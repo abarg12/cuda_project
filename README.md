@@ -3,4 +3,6 @@ ECE569: High Performance Computing
 
 CUDA optimization of SIFT
 
-[Useful Links](https://github.com/abarg12/cuda_project/wiki/Useful-Links)
+
+# References:
+Built off of a serial implementation of SIFT by dbarac: https://github.com/dbarac/sift-cpp/tree/master
