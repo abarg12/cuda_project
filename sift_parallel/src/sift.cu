@@ -6,9 +6,23 @@
 #include <array>
 #include <tuple>
 #include <cassert>
+#include <cuda_runtime.h>
 
 #include "sift.hpp"
 #include "image.hpp"
+
+
+#define CUDA_CHECK(ans)                                                   \
+  { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line,
+                      bool abort = true) {
+  if (code != cudaSuccess) {
+    fprintf(stderr, "GPUassert: %s %s %d\n", cudaGetErrorString(code),
+            file, line);
+    if (abort)
+      exit(code);
+  }
+}
 
 
 namespace sift {

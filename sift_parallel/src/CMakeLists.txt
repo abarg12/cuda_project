@@ -13,8 +13,10 @@ add_library(img STATIC
 target_link_libraries(img PRIVATE stb_image)
 
 add_library(sift STATIC
-            sift.cpp
+            sift.cu
             sift.hpp
+            gaussian_kernels.cu
+            histogram_kernels.cu
 )
 
 target_link_libraries(sift PRIVATE
