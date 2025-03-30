@@ -10,7 +10,7 @@
 
 #include "sift.hpp"
 #include "image.hpp"
-
+#include "histogram_kernels.cu"
 
 #define CUDA_CHECK(ans)                                                   \
   { gpuAssert((ans), __FILE__, __LINE__); }
@@ -257,6 +257,127 @@ std::vector<Keypoint> find_keypoints(const ScaleSpacePyramid& dog_pyramid, float
     return keypoints;
 }
 
+std::vector<Keypoint> find_keypoints_parallel(const ScaleSpacePyramid& dog_pyramid,
+                                              float contrast_thresh,
+                                              float edge_thresh)
+{
+    std::vector<Keypoint> keypoints;
+    for (int i = 0; i < dog_pyramid.num_octaves; i++) {
+        const std::vector<Image>& octave = dog_pyramid.octaves[i];
+        for (int j = 1; j < dog_pyramid.imgs_per_octave-1; j++) {
+            const Image &img = octave[j];
+            const Image &img_down = octave[j - 1];
+            const Image &img_up = octave[j + 1];
+
+
+            // Allocate device memory for the image at 3 different scales
+            // the 3 scales get compared for identifying keypoints
+            int img_size_b = img.size * sizeof(float); 
+            float *deviceImage;
+            CUDA_CHECK(
+                cudaMalloc((void **) &deviceImage, img_size_b * 3)
+            );
+            // Copy over host images to device memory
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage,
+                           img.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            );
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage + img.size,
+                           img_down.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            );
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage + 2 * img.size,
+                           img_up.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            )
+
+            // Allocate device memory for output buffer which is an array with
+            // the same size as the image where a 0 indicates a non-keypoint at
+            // the corresponding pixel position and a 1 indicates a keypoint
+            unsigned int *deviceKeypointOutput;
+            unsigned int *hostKeypointOutput = new unsigned int[img.size];
+            
+            CUDA_CHECK(
+                cudaMalloc((void **) &deviceKeypointOutput, img.size * sizeof(int))
+            );
+            // reset keypoint indicator buffer to all 0s
+            CUDA_CHECK(
+                cudaMemset(deviceKeypointOutput, 0, img.size * sizeof(int))
+            );
+
+            dim3 blockDim(512);
+            // Each thread responsible for visiting 
+            dim3 gridDim((img.size + blockDim.x - 1) / blockDim.x);
+            identify_keypoints<<<gridDim, blockDim>>>(deviceImage,
+                                                      deviceKeypointOutput,
+                                                      img.size,
+                                                      img.width,
+                                                      contrast_thresh);
+
+            CUDA_CHECK(
+                cudaMemcpy(hostKeypointOutput,
+                           deviceKeypointOutput,
+                           img.size * sizeof(int),
+                           cudaMemcpyDeviceToHost)
+            );
+
+            int totalkp = 0;
+            for (int ind = 0; ind < img.size; ind++) {
+                if (hostKeypointOutput[ind]) {
+                    totalkp++;
+                }
+            }
+            printf("total keypoints from GPU code: %d\n", totalkp);
+
+            // for (int x = 1; x < img.width-1; x++) {
+            //     for (int y = 1; y < img.height-1; y++) {
+            //         if (std::abs(img.get_pixel(x, y, 0)) < 0.8*contrast_thresh) {
+            //             continue;
+            //         }
+            //         if (point_is_extremum(octave, j, x, y)) {
+            //             Keypoint kp = {x, y, i, j, -1, -1, -1, -1};
+            //             bool kp_is_valid = refine_or_discard_keypoint(kp, octave, contrast_thresh,
+            //                                                           edge_thresh);
+            //             if (kp_is_valid) {
+            //                 keypoints.push_back(kp);
+            //             }
+            //         }
+            //     }
+            // }
+
+            for (int x = 1; x < img.width-1; x++) {
+                for (int y = 1; y < img.height-1; y++) {
+                    // if (std::abs(img.get_pixel(x, y, 0)) < 0.8*contrast_thresh) {
+                    //     continue;
+                    // }
+                    // if (point_is_extremum(octave, j, x, y)) {
+                    int img_idx = x + y * img.width;
+                    if (hostKeypointOutput[img_idx]) {
+                        Keypoint kp = {x, y, i, j, -1, -1, -1, -1};
+                        bool kp_is_valid = refine_or_discard_keypoint(kp, octave, contrast_thresh,
+                                                                      edge_thresh);
+                        if (kp_is_valid) {
+                            keypoints.push_back(kp);
+                        }
+                    }
+                    // }
+                }
+            }
+
+            CUDA_CHECK(cudaFree(deviceImage));
+            CUDA_CHECK(cudaFree(deviceKeypointOutput));
+            delete[] hostKeypointOutput;
+        }
+    }
+    return keypoints;
+}
+
 // calculate x and y derivatives for all images in the input pyramid
 ScaleSpacePyramid generate_gradient_pyramid(const ScaleSpacePyramid& pyramid)
 {
@@ -470,7 +591,8 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
     ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid(input, sigma_min, num_octaves,
                                                                    scales_per_octave);
     ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
-    std::vector<Keypoint> tmp_kps = find_keypoints(dog_pyramid, contrast_thresh, edge_thresh);
+    // std::vector<Keypoint> tmp_kps = find_keypoints(dog_pyramid, contrast_thresh, edge_thresh);
+    std::vector<Keypoint> tmp_kps = find_keypoints_parallel(dog_pyramid, contrast_thresh, edge_thresh);
     ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
     
     std::vector<Keypoint> kps;
