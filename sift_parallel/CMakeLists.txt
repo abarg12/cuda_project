@@ -19,3 +19,4 @@ project(sift_cpp LANGUAGES CXX CUDA)
 
 add_subdirectory(src)
 add_subdirectory(examples)
+add_subdirectory(timing_scripts)
