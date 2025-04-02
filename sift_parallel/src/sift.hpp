@@ -81,6 +81,15 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
                                                      float lambda_ori=LAMBDA_ORI,
                                                      float lambda_desc=LAMBDA_DESC);
 
+std::vector<Keypoint> find_keypoints_and_descriptors_parallel(const Image& img, 
+                                                              float sigma_min=SIGMA_MIN,
+                                                              int num_octaves=N_OCT, 
+                                                              int scales_per_octave=N_SPO, 
+                                                              float contrast_thresh=C_DOG,
+                                                              float edge_thresh=C_EDGE,
+                                                              float lambda_ori=LAMBDA_ORI,
+                                                              float lambda_desc=LAMBDA_DESC);
+
 std::vector<std::pair<int, int>> find_keypoint_matches(std::vector<Keypoint>& a,
                                                        std::vector<Keypoint>& b,
                                                        float thresh_relative=THRESH_RELATIVE,
