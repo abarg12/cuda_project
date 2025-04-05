@@ -259,9 +259,9 @@ std::vector<Keypoint> find_keypoints(const ScaleSpacePyramid& dog_pyramid, float
     return keypoints;
 }
 
-std::vector<Keypoint> find_keypoints_parallel(const ScaleSpacePyramid& dog_pyramid,
-                                              float contrast_thresh,
-                                              float edge_thresh)
+std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog_pyramid,
+                                                    float contrast_thresh,
+                                                    float edge_thresh)
 {
     std::vector<Keypoint> keypoints;
     for (int i = 0; i < dog_pyramid.num_octaves; i++) {
@@ -633,10 +633,15 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
 * The parallel 'main' function which calls all necessary functions to compute
 * the keypoints and descriptors.
 ******************************************************************************/
-std::vector<Keypoint> find_keypoints_and_descriptors_parallel(const Image& img, float sigma_min,
-                                                              int num_octaves, int scales_per_octave, 
-                                                              float contrast_thresh, float edge_thresh, 
-                                                              float lambda_ori, float lambda_desc)
+std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
+    const Image& img,
+    float sigma_min,
+    int num_octaves,
+    int scales_per_octave, 
+    float contrast_thresh,
+    float edge_thresh, 
+    float lambda_ori,
+    float lambda_desc)
 {
     assert(img.channels == 1 || img.channels == 3);
 
@@ -649,7 +654,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(const Image& img, 
     cudaEventCreate(&stopEvent);
 
     printf("--------------------------------------------------\n");
-    printf("RUNNING PARALLEL SIFT\n");
+    printf("RUNNING PARALLEL SIFT (NAIVE)\n");
 
     const Image& input = img.channels == 1 ? img : rgb_to_grayscale(img);
 
@@ -672,7 +677,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(const Image& img, 
 
     // Find keypoints
     cudaEventRecord(startEvent, 0);
-    std::vector<Keypoint> tmp_kps = find_keypoints_parallel(dog_pyramid, contrast_thresh, edge_thresh);
+    std::vector<Keypoint> tmp_kps = find_keypoints_parallel_naive(dog_pyramid, contrast_thresh, edge_thresh);
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
@@ -708,6 +713,93 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(const Image& img, 
 
     return kps;
 }
+
+
+/******************************************************************************
+* The parallel 'main' function which calls all necessary functions to compute
+* the keypoints and descriptors.
+******************************************************************************/
+std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
+    const Image& img,
+    float sigma_min,
+    int num_octaves,
+    int scales_per_octave, 
+    float contrast_thresh,
+    float edge_thresh, 
+    float lambda_ori,
+    float lambda_desc)
+{
+    assert(img.channels == 1 || img.channels == 3);
+
+    // The timer objects used to record the overall parallel runtime for each
+    // phase of SIFT. These time values include allocating and moving memory
+    // between the host and device and other overhead like error checking
+    cudaEvent_t startEvent, stopEvent;
+    float elapsedTime;
+    cudaEventCreate(&startEvent);
+    cudaEventCreate(&stopEvent);
+
+    printf("--------------------------------------------------\n");
+    printf("RUNNING PARALLEL SIFT (OPTIMIZED)\n");
+
+    const Image& input = img.channels == 1 ? img : rgb_to_grayscale(img);
+
+    // Generate the Gaussian Pyramid
+    cudaEventRecord(startEvent, 0);
+    ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid(input, sigma_min, num_octaves,
+                                                                   scales_per_octave);
+    cudaEventRecord(stopEvent, 0);
+    cudaEventSynchronize(stopEvent);
+    cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
+    printf("[Parallel] generate_gaussian_pyramid elapsed time %f ms\n", elapsedTime);
+
+    // Generate the DoG Pyramid
+    cudaEventRecord(startEvent, 0);
+    ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
+    cudaEventRecord(stopEvent, 0);
+    cudaEventSynchronize(stopEvent);
+    cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
+    printf("[Parallel] generate_dog_pyramid elapsed time %f ms\n", elapsedTime);
+
+    // Find keypoints
+    cudaEventRecord(startEvent, 0);
+    std::vector<Keypoint> tmp_kps = find_keypoints_parallel_naive(dog_pyramid, contrast_thresh, edge_thresh);
+    cudaEventRecord(stopEvent, 0);
+    cudaEventSynchronize(stopEvent);
+    cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
+    printf("[Parallel] find_keypoints_parallel elapsed time %f ms\n", elapsedTime);
+
+    // Generate gradient pyramid
+    cudaEventRecord(startEvent, 0);
+    ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
+    cudaEventRecord(stopEvent, 0);
+    cudaEventSynchronize(stopEvent);
+    cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
+    printf("[Parallel] generate_gradient_pyramid elapsed time %f ms\n", elapsedTime);
+
+    // Generate keypoint descriptors
+    cudaEventRecord(startEvent, 0);
+    std::vector<Keypoint> kps;  
+    for (Keypoint& kp_tmp : tmp_kps) {
+        std::vector<float> orientations = find_keypoint_orientations(kp_tmp, grad_pyramid,
+                                                                     lambda_ori, lambda_desc);
+        for (float theta : orientations) {
+            Keypoint kp = kp_tmp;
+            compute_keypoint_descriptor(kp, theta, grad_pyramid, lambda_desc);
+            kps.push_back(kp);
+        }
+    }
+    cudaEventRecord(stopEvent, 0);
+    cudaEventSynchronize(stopEvent);
+    cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
+    printf("[Parallel] keypoint descriptor generation elapsed time %f ms\n", elapsedTime);
+
+    cudaEventDestroy(startEvent);
+    cudaEventDestroy(stopEvent);
+
+    return kps;
+}
+
 
 float euclidean_dist(std::array<uint8_t, 128>& a, std::array<uint8_t, 128>& b)
 {
