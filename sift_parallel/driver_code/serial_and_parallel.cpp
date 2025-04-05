@@ -17,11 +17,10 @@ int main(int argc, char *argv[])
     img =  img.channels == 1 ? img : rgb_to_grayscale(img);
 
     std::vector<sift::Keypoint> kps = sift::find_keypoints_and_descriptors(img);
+    printf("[Serial] Found %d keypoints\n", kps.size());
 
     std::vector<sift::Keypoint> kps_p = sift::find_keypoints_and_descriptors_parallel(img);
-
-    std::cout << "(Serial) Found " << kps.size() << " keypoints\n";
-    std::cout << "(Parallel) Found " << kps_p.size() << " keypoints\n";
+    printf("[Parallel] Found %d keypoints\n", kps_p.size());
 
     return 0;
 }

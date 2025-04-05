@@ -573,34 +573,36 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
 
     const Image& input = img.channels == 1 ? img : rgb_to_grayscale(img);
 
+    printf("--------------------------------------------------\n");
+    printf("RUNNING SERIAL SIFT\n");
     // Generate the Gaussian Pyramid
     auto t_start = std::chrono::high_resolution_clock::now();
     ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid(input, sigma_min, num_octaves,
                                                                    scales_per_octave);
     auto t_end = std::chrono::high_resolution_clock::now();
     double elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    printf("Serial generate_gaussian_pyramid elapsed time: %f ms\n", elapsed_ms);
+    printf("[Serial] generate_gaussian_pyramid elapsed time: %f ms\n", elapsed_ms);
 
     // Generate the DoG Pyramid
     t_start = std::chrono::high_resolution_clock::now();
     ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
     t_end = std::chrono::high_resolution_clock::now();
     elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    printf("Serial generate_dog_pyramid elapsed time: %f ms\n", elapsed_ms);
+    printf("[Serial] generate_dog_pyramid elapsed time: %f ms\n", elapsed_ms);
 
     // Find keypoints
     t_start = std::chrono::high_resolution_clock::now();
     std::vector<Keypoint> tmp_kps = find_keypoints(dog_pyramid, contrast_thresh, edge_thresh);
     t_end = std::chrono::high_resolution_clock::now();
     elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    printf("Serial find_keypoints elapsed time: %f ms\n", elapsed_ms);
+    printf("[Serial] find_keypoints elapsed time: %f ms\n", elapsed_ms);
     
     // Generate gradient pyramid
     t_start = std::chrono::high_resolution_clock::now();
     ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
     t_end = std::chrono::high_resolution_clock::now();
     elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    printf("Serial generate_gradient_pyramid elapsed time: %f ms\n", elapsed_ms);
+    printf("[Serial] generate_gradient_pyramid elapsed time: %f ms\n", elapsed_ms);
     
     std::vector<Keypoint> kps;
 
@@ -617,7 +619,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
     }
     t_end = std::chrono::high_resolution_clock::now();
     elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    printf("Serial keypoint descriptor generation elapsed time: %f ms\n", elapsed_ms);
+    printf("[Serial] keypoint descriptor generation elapsed time: %f ms\n", elapsed_ms);
 
     return kps;
 }
@@ -628,6 +630,9 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(const Image& img, 
                                                               float lambda_ori, float lambda_desc)
 {
     assert(img.channels == 1 || img.channels == 3);
+
+    printf("--------------------------------------------------\n");
+    printf("RUNNING PARALLEL SIFT\n");
 
     const Image& input = img.channels == 1 ? img : rgb_to_grayscale(img);
     ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid(input, sigma_min, num_octaves,
