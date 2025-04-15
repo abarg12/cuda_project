@@ -1,6 +1,4 @@
-// __global__ void histogram_kernel() {
-//     return;
-// }
+#include "sift.hpp"
 
 __global__ void identify_keypoints(float *image,
                                    unsigned int *keypoints,
@@ -15,16 +13,12 @@ __global__ void identify_keypoints(float *image,
     if (image_idx < image_size) {
         if (std::abs(image[image_idx]) >= (0.8 * contrast_thresh)) {
             bool is_min = true, is_max = true;
-            // float val = img.get_pixel(x, y, 0);
             float val = image[image_idx];
             float neighbor = 0;
             int offset = 0;
 
-            // for (int dx : {-1,0,1}) {
-                // for (int dy : {-1,0,1}) {
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dy = -1; dy <= 1; dy++) {
-                    // neighbor = prev.get_pixel(x+dx, y+dy, 0);
                     offset = (dy * image_width) + dx;
                     if (image_idx + offset < 0 || image_idx + offset >= image_size) {
                         continue;
@@ -34,12 +28,10 @@ __global__ void identify_keypoints(float *image,
                     if (neighbor > val) is_max = false;
                     if (neighbor < val) is_min = false;
 
-                    // neighbor = next.get_pixel(x+dx, y+dy, 0);
                     neighbor = image[image_up_idx + (dy * image_width) + dx];
                     if (neighbor > val) is_max = false;
                     if (neighbor < val) is_min = false;
 
-                    // neighbor = img.get_pixel(x+dx, y+dy, 0);
                     neighbor = image[image_idx + (dy * image_width) + dx];
                     if (neighbor > val) is_max = false;
                     if (neighbor < val) is_min = false;
@@ -55,4 +47,21 @@ __global__ void identify_keypoints(float *image,
     }
 
     return;
+}
+
+
+__global__ void generate_orientations_naive(float *devicePyramid,
+                                            sift::Keypoint *deviceKeypoints,
+                                            float *deviceDescriptors,
+                                            int *deviceImgOffsets,
+                                            int *deviceImgWidths,
+                                            int *deviceImgHeights,
+                                            int num_kps,
+                                            int num_scales_per_octave)
+{
+    int kp_idx = threadIdx.x + blockDim.x * blockIdx.x;
+
+    if (kp_idx < num_kps) {
+        float pix_dist = sift::MIN_PIX_DIST * std::pow(2, deviceKeypoints[kp_idx].octave);
+    }
 }

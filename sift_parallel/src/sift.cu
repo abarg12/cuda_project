@@ -314,7 +314,6 @@ std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog
             );
 
             dim3 blockDim(512);
-            // Each thread responsible for visiting 
             dim3 gridDim((img.size + blockDim.x - 1) / blockDim.x);
             identify_keypoints<<<gridDim, blockDim>>>(deviceImage,
                                                       deviceKeypointOutput,
@@ -338,10 +337,6 @@ std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog
 
             for (int x = 1; x < img.width-1; x++) {
                 for (int y = 1; y < img.height-1; y++) {
-                    // if (std::abs(img.get_pixel(x, y, 0)) < 0.8*contrast_thresh) {
-                    //     continue;
-                    // }
-                    // if (point_is_extremum(octave, j, x, y)) {
                     int img_idx = x + y * img.width;
                     if (hostKeypointOutput[img_idx]) {
                         Keypoint kp = {x, y, i, j, -1, -1, -1, -1};
@@ -351,7 +346,6 @@ std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog
                             keypoints.push_back(kp);
                         }
                     }
-                    // }
                 }
             }
 
@@ -468,6 +462,109 @@ std::vector<float> find_keypoint_orientations(Keypoint& kp,
         }
     }
     return orientations;
+}
+
+std::vector<float> find_keypoint_orientations_parallel_naive(std::vector<Keypoint>& kps,
+                                                             const ScaleSpacePyramid& grad_pyramid,
+                                                             float lambda_ori,
+                                                             float lambda_desc)
+{
+    int pyramidOneDimSize = 0;
+    for (int i = 0; i < grad_pyramid.num_octaves; i++) {
+        for (int j = 0; j < grad_pyramid.imgs_per_octave; j++) {
+            pyramidOneDimSize += grad_pyramid.octaves[i][j].size;
+        }
+    }
+
+    // Allocate global memory to hold the input gradient pyramid
+    float *devicePyramid;
+    CUDA_CHECK(
+        cudaMalloc((void**) &devicePyramid, pyramidOneDimSize * sizeof(float)));
+
+    // Copy gradient pyramid data into global memory
+    int image_idx = 0;
+    for (int i = 0; i < grad_pyramid.num_octaves; i++) {
+        for (int j = 0; j < grad_pyramid.imgs_per_octave; j++) {
+            CUDA_CHECK(
+                cudaMemcpy(devicePyramid + image_idx,
+                           grad_pyramid.octaves[i][j].data,
+                           grad_pyramid.octaves[i][j].size,
+                           cudaMemcpyHostToDevice));
+            image_idx += grad_pyramid.octaves[i][j].size;
+        }
+    }
+
+    // Allocate global memory and host memory to hold keypoints
+    Keypoint *deviceKeypoints;
+    CUDA_CHECK(
+        cudaMalloc((void **) &deviceKeypoints, kps.size() * sizeof(Keypoint)));
+    
+    Keypoint *hostKeypoints = kps.data();
+    
+    // Copy keypoints from host to device memory
+    CUDA_CHECK(
+        cudaMemcpy(deviceKeypoints, hostKeypoints, 
+                   kps.size() * sizeof(Keypoint), cudaMemcpyHostToDevice));
+
+
+    // Allocate global memory and host memory to hold keypoint orientations
+    float *hostDescriptors = new float[kps.size() * N_BINS * sizeof(float)];
+    float *deviceDescriptors;
+    CUDA_CHECK(
+        cudaMalloc((void **) &deviceDescriptors, kps.size() * N_BINS * sizeof(float)));
+    CUDA_CHECK(
+        cudaMemset(deviceDescriptors, 0, kps.size() * N_BINS * sizeof(float)));
+    
+
+    // Compute image dimensions in order to index into the gradient pyramid
+    int total_images = grad_pyramid.num_octaves * grad_pyramid.imgs_per_octave;
+    std::vector<int> imageOffsets(total_images);
+    std::vector<int> imageWidths(total_images);
+    std::vector<int> imageHeights(total_images);
+    int *deviceImgOffsets, *deviceImgWidths, *deviceImgHeights;
+    CUDA_CHECK(
+        cudaMalloc((void **) &deviceImgOffsets, total_images * sizeof(int)));
+    CUDA_CHECK(
+        cudaMalloc((void **) &deviceImgWidths, total_images * sizeof(int)));
+    CUDA_CHECK(
+        cudaMalloc((void **) &deviceImgHeights, total_images * sizeof(int)));
+
+
+    int offset = 0;
+    int idx = 0;
+    for (int i = 0; i < grad_pyramid.num_octaves; i++) {
+        for (int j = 0; j < grad_pyramid.imgs_per_octave; j++) {
+            const Image& img = grad_pyramid.octaves[i][j];
+            imageOffsets[idx] = offset;
+            imageWidths[idx] = img.width;
+            imageHeights[idx] = img.height;
+            offset += img.size;
+            idx++;
+        }
+    }
+
+    cudaMemcpy(deviceImgOffsets, imageOffsets.data(), total_images * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(deviceImgWidths, imageWidths.data(), total_images * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(deviceImgHeights, imageHeights.data(), total_images * sizeof(int), cudaMemcpyHostToDevice);
+
+
+    dim3 blockDim(512);
+    dim3 gridDim((kps.size() + blockDim.x - 1) / blockDim.x);
+    generate_orientations_naive<<<gridDim, blockDim>>>(devicePyramid,
+                                                       deviceKeypoints,
+                                                       deviceDescriptors,
+                                                       deviceImgOffsets,
+                                                       deviceImgWidths,
+                                                       deviceImgHeights,
+                                                       kps.size(),
+                                                       grad_pyramid.imgs_per_octave);
+
+
+    CUDA_CHECK(cudaFree(devicePyramid));
+    CUDA_CHECK(cudaFree(deviceDescriptors));
+    delete[] hostDescriptors;
+
+    return {};
 }
 
 void update_histograms(float hist[N_HIST][N_HIST][N_ORI], float x, float y,
@@ -693,6 +790,10 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
 
     // Generate keypoint descriptors
     cudaEventRecord(startEvent, 0);
+    std::vector<float> orientations_parallel = find_keypoint_orientations_parallel_naive
+                                            (tmp_kps, grad_pyramid, lambda_ori, lambda_desc);
+
+
     std::vector<Keypoint> kps;  
     for (Keypoint& kp_tmp : tmp_kps) {
         std::vector<float> orientations = find_keypoint_orientations(kp_tmp, grad_pyramid,
