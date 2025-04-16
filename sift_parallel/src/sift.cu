@@ -464,10 +464,10 @@ std::vector<float> find_keypoint_orientations(Keypoint& kp,
     return orientations;
 }
 
-std::vector<float> find_keypoint_orientations_parallel_naive(std::vector<Keypoint>& kps,
-                                                             const ScaleSpacePyramid& grad_pyramid,
-                                                             float lambda_ori,
-                                                             float lambda_desc)
+std::vector<std::vector<float>> find_keypoint_orientations_parallel_naive(std::vector<Keypoint>& kps,
+                                                                          const ScaleSpacePyramid& grad_pyramid,
+                                                                          float lambda_ori,
+                                                                          float lambda_desc)
 {
     int pyramidOneDimSize = 0;
     for (int i = 0; i < grad_pyramid.num_octaves; i++) {
@@ -508,12 +508,12 @@ std::vector<float> find_keypoint_orientations_parallel_naive(std::vector<Keypoin
 
 
     // Allocate global memory and host memory to hold keypoint orientations
-    float *hostDescriptors = new float[kps.size() * N_BINS * sizeof(float)];
-    float *deviceDescriptors;
+    float *hostOrientations = new float[kps.size() * N_BINS * sizeof(float)];
+    float *deviceOrientations;
     CUDA_CHECK(
-        cudaMalloc((void **) &deviceDescriptors, kps.size() * N_BINS * sizeof(float)));
+        cudaMalloc((void **) &deviceOrientations, kps.size() * N_BINS * sizeof(float)));
     CUDA_CHECK(
-        cudaMemset(deviceDescriptors, 0, kps.size() * N_BINS * sizeof(float)));
+        cudaMemset(deviceOrientations, 0, kps.size() * N_BINS * sizeof(float)));
     
 
     // Compute image dimensions in order to index into the gradient pyramid
@@ -543,28 +543,51 @@ std::vector<float> find_keypoint_orientations_parallel_naive(std::vector<Keypoin
         }
     }
 
-    cudaMemcpy(deviceImgOffsets, imageOffsets.data(), total_images * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(deviceImgWidths, imageWidths.data(), total_images * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(deviceImgHeights, imageHeights.data(), total_images * sizeof(int), cudaMemcpyHostToDevice);
+    CUDA_CHECK(
+        cudaMemcpy(deviceImgOffsets, imageOffsets.data(), total_images * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(
+        cudaMemcpy(deviceImgWidths, imageWidths.data(), total_images * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(
+        cudaMemcpy(deviceImgHeights, imageHeights.data(), total_images * sizeof(int), cudaMemcpyHostToDevice));
 
 
     dim3 blockDim(512);
     dim3 gridDim((kps.size() + blockDim.x - 1) / blockDim.x);
     generate_orientations_naive<<<gridDim, blockDim>>>(devicePyramid,
                                                        deviceKeypoints,
-                                                       deviceDescriptors,
+                                                       deviceOrientations,
                                                        deviceImgOffsets,
                                                        deviceImgWidths,
                                                        deviceImgHeights,
                                                        kps.size(),
-                                                       grad_pyramid.imgs_per_octave);
+                                                       grad_pyramid.imgs_per_octave,
+                                                       lambda_ori,
+                                                       lambda_desc);
 
+    CUDA_CHECK(
+        cudaMemcpy(hostOrientations, deviceOrientations, kps.size() * N_BINS * sizeof(float), cudaMemcpyDeviceToHost));
+
+    // create output std::vector of keypoint orientations
+    std::vector<std::vector<float>> orientation_outvec;
+    for (int i = 0; i < kps.size(); i++) {
+        orientation_outvec.push_back({});
+        for (int j = 0; j < N_BINS; j++) {
+            if (hostOrientations[i * N_BINS + j] != 0.0) {
+                orientation_outvec[i].push_back(hostOrientations[i * N_BINS + j]);
+            }
+        }
+        std::cout << "outvec[" << i << "] = " << orientation_outvec[i].size() << "\n";
+    }
 
     CUDA_CHECK(cudaFree(devicePyramid));
-    CUDA_CHECK(cudaFree(deviceDescriptors));
-    delete[] hostDescriptors;
+    CUDA_CHECK(cudaFree(deviceKeypoints));
+    CUDA_CHECK(cudaFree(deviceOrientations));
+    CUDA_CHECK(cudaFree(deviceImgOffsets));
+    CUDA_CHECK(cudaFree(deviceImgWidths));
+    CUDA_CHECK(cudaFree(deviceImgHeights));
+    delete[] hostOrientations;
 
-    return {};
+    return orientation_outvec;
 }
 
 void update_histograms(float hist[N_HIST][N_HIST][N_ORI], float x, float y,
@@ -718,6 +741,8 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
             compute_keypoint_descriptor(kp, theta, grad_pyramid, lambda_desc);
             kps.push_back(kp);
         }
+
+        std::cout << "kps size: " << kps.size() << "\n";
     }
     t_end = std::chrono::high_resolution_clock::now();
     elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
@@ -790,20 +815,28 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
 
     // Generate keypoint descriptors
     cudaEventRecord(startEvent, 0);
-    std::vector<float> orientations_parallel = find_keypoint_orientations_parallel_naive
-                                            (tmp_kps, grad_pyramid, lambda_ori, lambda_desc);
-
-
-    std::vector<Keypoint> kps;  
-    for (Keypoint& kp_tmp : tmp_kps) {
-        std::vector<float> orientations = find_keypoint_orientations(kp_tmp, grad_pyramid,
-                                                                     lambda_ori, lambda_desc);
-        for (float theta : orientations) {
-            Keypoint kp = kp_tmp;
+    std::vector<std::vector<float>> orientations_parallel = find_keypoint_orientations_parallel_naive
+                                                                (tmp_kps, grad_pyramid, lambda_ori, lambda_desc);
+    std::vector<Keypoint> kps;
+    for (int i = 0; i < orientations_parallel.size(); i++) {
+        for (float theta : orientations_parallel[i]) {
+            Keypoint kp = tmp_kps[i];
             compute_keypoint_descriptor(kp, theta, grad_pyramid, lambda_desc);
             kps.push_back(kp);
         }
     }
+
+
+    // std::vector<Keypoint> kps;  
+    // for (Keypoint& kp_tmp : tmp_kps) {
+    //     std::vector<float> orientations = find_keypoint_orientations(kp_tmp, grad_pyramid,
+    //                                                                  lambda_ori, lambda_desc);
+    //     for (float theta : orientations) {
+    //         Keypoint kp = kp_tmp;
+    //         compute_keypoint_descriptor(kp, theta, grad_pyramid, lambda_desc);
+    //         kps.push_back(kp);
+    //     }
+    // }
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);

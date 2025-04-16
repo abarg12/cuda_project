@@ -73,7 +73,7 @@ ScaleSpacePyramid generate_gradient_pyramid(const ScaleSpacePyramid& pyramid);
 std::vector<float> find_keypoint_orientations(Keypoint& kp, const ScaleSpacePyramid& grad_pyramid,
                                               float lambda_ori=LAMBDA_ORI, float lambda_desc=LAMBDA_DESC);
 
-std::vector<float> find_keypoint_orientations_parallel_naive(std::vector<Keypoint>& kps,
+std::vector<std::vector<float>> find_keypoint_orientations_parallel_naive(std::vector<Keypoint>& kps,
                                                              const ScaleSpacePyramid& grad_pyramid,
                                                              float lambda_ori=LAMBDA_ORI,
                                                              float lambda_desc=LAMBDA_DESC);
