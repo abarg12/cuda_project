@@ -298,7 +298,7 @@ std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog
                            img_up.data,
                            img_size_b,
                            cudaMemcpyHostToDevice)
-            )
+            );
 
             // Allocate device memory for output buffer which is an array with
             // the same size as the image where a 0 indicates a non-keypoint at
@@ -489,7 +489,7 @@ std::vector<std::vector<float>> find_keypoint_orientations_parallel_naive(std::v
             CUDA_CHECK(
                 cudaMemcpy(devicePyramid + image_idx,
                            grad_pyramid.octaves[i][j].data,
-                           grad_pyramid.octaves[i][j].size,
+                           grad_pyramid.octaves[i][j].size * sizeof(float),
                            cudaMemcpyHostToDevice));
             image_idx += grad_pyramid.octaves[i][j].size;
         }
@@ -509,7 +509,7 @@ std::vector<std::vector<float>> find_keypoint_orientations_parallel_naive(std::v
 
 
     // Allocate global memory and host memory to hold keypoint orientations
-    float *hostOrientations = new float[kps.size() * N_BINS * sizeof(float)];
+    float *hostOrientations = new float[kps.size() * N_BINS];
     float *deviceOrientations;
     CUDA_CHECK(
         cudaMalloc((void **) &deviceOrientations, kps.size() * N_BINS * sizeof(float)));
@@ -816,6 +816,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
     cudaEventRecord(startEvent, 0);
     std::vector<std::vector<float>> orientations_parallel = find_keypoint_orientations_parallel_naive
                                                                 (tmp_kps, grad_pyramid, lambda_ori, lambda_desc);
+    
     std::vector<Keypoint> kps;
     for (int i = 0; i < orientations_parallel.size(); i++) {
         for (float theta : orientations_parallel[i]) {
@@ -825,17 +826,6 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
         }
     }
 
-
-    // std::vector<Keypoint> kps;  
-    // for (Keypoint& kp_tmp : tmp_kps) {
-    //     std::vector<float> orientations = find_keypoint_orientations(kp_tmp, grad_pyramid,
-    //                                                                  lambda_ori, lambda_desc);
-    //     for (float theta : orientations) {
-    //         Keypoint kp = kp_tmp;
-    //         compute_keypoint_descriptor(kp, theta, grad_pyramid, lambda_desc);
-    //         kps.push_back(kp);
-    //     }
-    // }
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);

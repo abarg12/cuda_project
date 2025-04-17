@@ -101,7 +101,7 @@ __global__ void generate_orientations_naive(float *devicePyramid,
 
     float hist[sift::N_BINS] = {0.0};
     int bin;
-    float gx, gy, grad_norm, img_weight, theta;
+    float gx, gy, grad_norm, weight, theta;
     float patch_sigma = lambda_ori * kp.sigma;
     float patch_radius = 3.0 * patch_sigma;
 
@@ -112,19 +112,22 @@ __global__ void generate_orientations_naive(float *devicePyramid,
 
     for (int x = x_start; x <= x_end; x++) {
         for (int y = y_start; y <= y_end; y++) {
-            if (x < 0 || y < 0 || x >= img_width || y >= img_height) continue;
+            int clamped_x = max(0, min(x, img_width - 1));
+            int clamped_y = max(0, min(y, img_height - 1));
+            int idx = clamped_y * img_width + clamped_x;
 
-            gx = devicePyramid[img_offset + 2 * (y * img_width + x)];
-            gy = devicePyramid[img_offset + 2 * (y * img_width + x) + 1];
+            gx = devicePyramid[img_offset + idx];
+            gy = devicePyramid[img_offset + idx + img_width * img_height];
+
             grad_norm = sqrtf(gx * gx + gy * gy);
 
-            img_weight = expf(-(powf(x * pix_dist - kp.x, 2.0) +
-                              powf(y * pix_dist - kp.y, 2.0)) /
-                            (2.0 * patch_sigma * patch_sigma));
+            weight = expf(-(powf(x * pix_dist - kp.x, 2) +
+                              powf(y * pix_dist - kp.y, 2)) /
+                            (2 * patch_sigma * patch_sigma));
 
-            theta = fmodf(atan2f(gy, gx) + 2.0 * M_PI, 2.0 * M_PI);
-            bin = ((int)roundf(sift::N_BINS / (2.0 * M_PI) * theta)) % sift::N_BINS;
-            hist[bin] += img_weight * grad_norm;
+            theta = fmodf(atan2f(gy, gx) + 2 * M_PI, 2 * M_PI);
+            bin = ((int)roundf(sift::N_BINS / (2 * M_PI) * theta)) % sift::N_BINS;
+            hist[bin] += weight * grad_norm;
         }
     }
 
@@ -144,9 +147,8 @@ __global__ void generate_orientations_naive(float *devicePyramid,
             float prev = hist[(i - 1 + sift::N_BINS) % sift::N_BINS];
             float next = hist[(i + 1) % sift::N_BINS];
             if (prev > hist[i] || next > hist[i]) {
-                // deviceOrientations[tid * sift::N_BINS + j] = -1.0f;
                 continue;
-            };
+            }
 
             float theta = 2*M_PI*(i+1)/sift::N_BINS + M_PI/sift::N_BINS*(prev-next)/(prev-2*hist[i]+next);
             deviceOrientations[tid * sift::N_BINS + i] = theta;
