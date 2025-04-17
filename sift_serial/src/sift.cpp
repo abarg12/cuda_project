@@ -155,7 +155,7 @@ std::tuple<float, float, float> fit_quadratic(Keypoint& kp,
     float interpolated_extrema_val = img.get_pixel(x, y, 0)
                                    + 0.5*(g1*offset_s + g2*offset_x + g3*offset_y);
     kp.extremum_val = interpolated_extrema_val;
-    return {offset_s, offset_x, offset_y};
+    return std::make_tuple(offset_s, offset_x, offset_y);
 }
 
 bool point_is_on_edge(const Keypoint& kp, const std::vector<Image>& octave, float edge_thresh=C_EDGE)
