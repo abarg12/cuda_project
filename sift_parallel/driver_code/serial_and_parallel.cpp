@@ -29,7 +29,7 @@ int main(int argc, char *argv[])
     printf("--------------------------------------------------\n");
     printf("VERIFYING ACCURACY OF PARALLEL VERSIONS\n");
     if (kps.size() != kps_p.size()) {
-        printf("[FAILURE] Serial: %d keypoints, Naive Parallel: %d keypoints\n", kps.size(), kps_p.size());
+        printf("[!!!FAILURE!!!] Serial: %d keypoints, Naive Parallel: %d keypoints\n", kps.size(), kps_p.size());
     } else {
         printf("[SUCCESS] Serial: %d keypoints, Naive Parallel: %d keypoints\n", kps.size(), kps_p.size());
 
@@ -40,13 +40,27 @@ int main(int argc, char *argv[])
         }
         if (same_locations) {
             printf("[SUCCESS] Serial and Naive Parallel keypoint locations match\n");
+
+            bool same_descriptors = true;
+            for (int i = 0; i < kps.size(); i++) {
+                for (int j = 0; j < 128; j++) {
+                    if (kps[i].descriptor[j] != kps_p[i].descriptor[j]) same_descriptors = false;
+                    if (kps[i].descriptor[j] != kps_p[i].descriptor[j]) same_descriptors = false;
+                }
+            }
+            if (same_descriptors) {
+                printf("[SUCCESS] Serial and Naive Parallel descriptors match\n");
+            } else {
+                 printf("[!!!FAILURE!!!] Serial and Naive Parallel descriptors do not match\n");
+            }
+
         } else {
-            printf("[FAILURE] Serial and Naive Parallel keypoint locations do not match\n");
+            printf("[!!!FAILURE!!!] Serial and Naive Parallel keypoint locations do not match\n");
         }
     }
 
     if (kps.size() != kps_p_opt.size()) {
-        printf("[FAILURE] Serial: %d keypoints, Optimized Parallel: %d keypoints\n", kps.size(), kps_p_opt.size());
+        printf("[!!!FAILURE!!!] Serial: %d keypoints, Optimized Parallel: %d keypoints\n", kps.size(), kps_p_opt.size());
     } else {
         printf("[SUCCESS] Serial: %d keypoints, Optimized Parallel: %d keypoints\n", kps.size(), kps_p_opt.size());
         bool same_locations = true;
@@ -56,8 +70,22 @@ int main(int argc, char *argv[])
         }
         if (same_locations) {
             printf("[SUCCESS] Serial and Optimized Parallel keypoint locations match\n");
+
+            bool same_descriptors = true;
+            for (int i = 0; i < kps.size(); i++) {
+                for (int j = 0; j < 128; j++) {
+                    if (kps[i].descriptor[j] != kps_p_opt[i].descriptor[j]) same_descriptors = false;
+                    if (kps[i].descriptor[j] != kps_p_opt[i].descriptor[j]) same_descriptors = false;
+                }
+            }
+            if (same_descriptors) {
+                printf("[SUCCESS] Serial and Optimized Parallel descriptors match\n");
+            } else {
+                 printf("[!!!FAILURE!!!] Serial and Optimized Parallel descriptors do not match\n");
+            }
+
         } else {
-            printf("[FAILURE] Serial and Optimized Parallel keypoint locations do not match\n");
+            printf("[!!!FAILURE!!!] Serial and Optimized Parallel keypoint locations do not match\n");
         }
     }
 

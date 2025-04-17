@@ -81,6 +81,13 @@ std::vector<std::vector<float>> find_keypoint_orientations_parallel_naive(std::v
 void compute_keypoint_descriptor(Keypoint& kp, float theta, const ScaleSpacePyramid& grad_pyramid,
                                  float lambda_desc=LAMBDA_DESC);
 
+
+void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kp,
+                                                std::vector<float> thetas,
+                                                const ScaleSpacePyramid& grad_pyramid,
+                                                float lambda_desc=LAMBDA_DESC);
+
+
 std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sigma_min=SIGMA_MIN,
                                                      int num_octaves=N_OCT, 
                                                      int scales_per_octave=N_SPO, 

@@ -685,6 +685,55 @@ void compute_keypoint_descriptor(Keypoint& kp, float theta,
     hists_to_vec(histograms, kp.descriptor);
 }
 
+
+void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kp,
+                                                std::vector<float> theta,
+                                                const ScaleSpacePyramid& grad_pyramid,
+                                                float lambda_desc)
+{
+    // float pix_dist = MIN_PIX_DIST * std::pow(2, kp.octave);
+    // const Image& img_grad = grad_pyramid.octaves[kp.octave][kp.scale];
+    // float histograms[N_HIST][N_HIST][N_ORI] = {0};
+
+    // //find start and end coords for loops over image patch
+    // float half_size = std::sqrt(2)*lambda_desc*kp.sigma*(N_HIST+1.)/N_HIST;
+    // int x_start = std::round((kp.x-half_size) / pix_dist);
+    // int x_end = std::round((kp.x+half_size) / pix_dist);
+    // int y_start = std::round((kp.y-half_size) / pix_dist);
+    // int y_end = std::round((kp.y+half_size) / pix_dist);
+
+    // float cos_t = std::cos(theta), sin_t = std::sin(theta);
+    // float patch_sigma = lambda_desc * kp.sigma;
+    // //accumulate samples into histograms
+    // for (int m = x_start; m <= x_end; m++) {
+    //     for (int n = y_start; n <= y_end; n++) {
+    //         // find normalized coords w.r.t. kp position and reference orientation
+    //         float x = ((m*pix_dist - kp.x)*cos_t
+    //                   +(n*pix_dist - kp.y)*sin_t) / kp.sigma;
+    //         float y = (-(m*pix_dist - kp.x)*sin_t
+    //                    +(n*pix_dist - kp.y)*cos_t) / kp.sigma;
+
+    //         // verify (x, y) is inside the description patch
+    //         if (std::max(std::abs(x), std::abs(y)) > lambda_desc*(N_HIST+1.)/N_HIST)
+    //             continue;
+
+    //         float gx = img_grad.get_pixel(m, n, 0), gy = img_grad.get_pixel(m, n, 1);
+    //         float theta_mn = std::fmod(std::atan2(gy, gx)-theta+4*M_PI, 2*M_PI);
+    //         float grad_norm = std::sqrt(gx*gx + gy*gy);
+    //         float weight = std::exp(-(std::pow(m*pix_dist-kp.x, 2)+std::pow(n*pix_dist-kp.y, 2))
+    //                                 /(2*patch_sigma*patch_sigma));
+    //         float contribution = weight * grad_norm;
+
+    //         update_histograms(histograms, x, y, contribution, theta_mn, lambda_desc);
+    //     }
+    // }
+
+    // // build feature vector (descriptor) from histograms
+    // hists_to_vec(histograms, kp.descriptor);
+}
+
+
+
 /******************************************************************************
 * The serial 'main' function which calls all necessary functions to compute the
 * keypoints and descriptors.
@@ -816,15 +865,19 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
     cudaEventRecord(startEvent, 0);
     std::vector<std::vector<float>> orientations_parallel = find_keypoint_orientations_parallel_naive
                                                                 (tmp_kps, grad_pyramid, lambda_ori, lambda_desc);
-    
+
     std::vector<Keypoint> kps;
     for (int i = 0; i < orientations_parallel.size(); i++) {
         for (float theta : orientations_parallel[i]) {
             Keypoint kp = tmp_kps[i];
-            compute_keypoint_descriptor(kp, theta, grad_pyramid, lambda_desc);
             kps.push_back(kp);
         }
     }
+    std::vector<float> one_dim_orienations;
+    for (const auto& row : orientations_parallel) {
+        one_dim_orienations.insert(one_dim_orienations.end(), row.begin(), row.end());
+    }
+    compute_keypoint_descriptors_parallel_naive(kps, one_dim_orienations, grad_pyramid, lambda_desc);
 
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
