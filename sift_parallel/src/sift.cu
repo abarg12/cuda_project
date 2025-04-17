@@ -572,11 +572,10 @@ std::vector<std::vector<float>> find_keypoint_orientations_parallel_naive(std::v
     for (int i = 0; i < kps.size(); i++) {
         orientation_outvec.push_back({});
         for (int j = 0; j < N_BINS; j++) {
-            if (hostOrientations[i * N_BINS + j] != 0.0) {
+            if (hostOrientations[i * N_BINS + j] != 0.0 && !isnan(hostOrientations[i * N_BINS + j])) {
                 orientation_outvec[i].push_back(hostOrientations[i * N_BINS + j]);
             }
         }
-        std::cout << "outvec[" << i << "] = " << orientation_outvec[i].size() << "\n";
     }
 
     CUDA_CHECK(cudaFree(devicePyramid));
@@ -736,13 +735,12 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
     for (Keypoint& kp_tmp : tmp_kps) {
         std::vector<float> orientations = find_keypoint_orientations(kp_tmp, grad_pyramid,
                                                                      lambda_ori, lambda_desc);
+        
         for (float theta : orientations) {
             Keypoint kp = kp_tmp;
             compute_keypoint_descriptor(kp, theta, grad_pyramid, lambda_desc);
             kps.push_back(kp);
         }
-
-        std::cout << "kps size: " << kps.size() << "\n";
     }
     t_end = std::chrono::high_resolution_clock::now();
     elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();

@@ -50,6 +50,21 @@ __global__ void identify_keypoints(float *image,
 }
 
 
+__device__ void smooth_histogram_device(float* hist) {
+    float tmp[sift::N_BINS];
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < sift::N_BINS; j++) {
+            int prev = (j - 1 + sift::N_BINS) % sift::N_BINS;
+            int next = (j + 1) % sift::N_BINS;
+            tmp[j] = (hist[prev] + hist[j] + hist[next]) / 3.0;
+        }
+        for (int j = 0; j < sift::N_BINS; j++) {
+            hist[j] = tmp[j];
+        }
+    }
+}
+
+
 __global__ void generate_orientations_naive(float *devicePyramid,
                                             sift::Keypoint *deviceKeypoints,
                                             float *deviceOrientations,
@@ -79,15 +94,16 @@ __global__ void generate_orientations_naive(float *devicePyramid,
     float min_dist_from_border = fminf(fminf(kp.x, kp.y), 
                                        fminf(pix_dist * img_width - kp.x,
                                              pix_dist * img_height - kp.y));
+
     if (min_dist_from_border <= sqrtf(2.0) * lambda_desc * kp.sigma) {
         return;
     }
 
-    float hist[sift::N_BINS] = {0};
+    float hist[sift::N_BINS] = {0.0};
     int bin;
     float gx, gy, grad_norm, img_weight, theta;
     float patch_sigma = lambda_ori * kp.sigma;
-    float patch_radius = 3.0f * patch_sigma;
+    float patch_radius = 3.0 * patch_sigma;
 
     int x_start = roundf((kp.x - patch_radius) / pix_dist);
     int x_end   = roundf((kp.x + patch_radius) / pix_dist);
@@ -102,49 +118,38 @@ __global__ void generate_orientations_naive(float *devicePyramid,
             gy = devicePyramid[img_offset + 2 * (y * img_width + x) + 1];
             grad_norm = sqrtf(gx * gx + gy * gy);
 
-            img_weight = __expf(-(powf(x * pix_dist - kp.x, 2.0f) +
-                              powf(y * pix_dist - kp.y, 2.0f)) /
-                            (2.0f * patch_sigma * patch_sigma));
+            img_weight = expf(-(powf(x * pix_dist - kp.x, 2.0) +
+                              powf(y * pix_dist - kp.y, 2.0)) /
+                            (2.0 * patch_sigma * patch_sigma));
 
-            theta = fmodf(atan2f(gy, gx) + 2.0f * M_PI, 2.0f * M_PI);
-            bin = ((int)roundf(sift::N_BINS / (2.0f * M_PI) * theta)) % sift::N_BINS;
+            theta = fmodf(atan2f(gy, gx) + 2.0 * M_PI, 2.0 * M_PI);
+            bin = ((int)roundf(sift::N_BINS / (2.0 * M_PI) * theta)) % sift::N_BINS;
             hist[bin] += img_weight * grad_norm;
         }
     }
 
-    // For now: skip or do basic moving average
-    float smooth[sift::N_BINS];
-    for (int i = 0; i < sift::N_BINS; i++) {
-        float prev = hist[(i - 1 + sift::N_BINS) % sift::N_BINS];
-        float next = hist[(i + 1) % sift::N_BINS];
-        smooth[i] = 0.25f * prev + 0.5f * hist[i] + 0.25f * next;
-    }
-    for (int i = 0; i < sift::N_BINS; i++) hist[i] = smooth[i];
+    smooth_histogram_device(hist);
 
     // extract reference orientations
-    float ori_thresh = 0.8f;
-    float ori_max = 0.0f;
-    for (int j = 0; j < sift::N_BINS; j++) {
-        if (hist[j] > ori_max) {
-            ori_max = hist[j];
+    float ori_thresh = 0.8;
+    float ori_max = 0.0;
+    for (int i = 0; i < sift::N_BINS; i++) {
+        if (hist[i] > ori_max) {
+            ori_max = hist[i];
         }
     }
 
-    for (int j = 0; j < sift::N_BINS; j++) {
-        if (hist[j] >= ori_thresh * ori_max) {
-            float prev = hist[(j - 1 + sift::N_BINS) % sift::N_BINS];
-            float next = hist[(j + 1) % sift::N_BINS];
-            // Use -1.0 to indicate no bin value added at this location
-            if (prev > hist[j] || next > hist[j]) {
+    for (int i = 0; i < sift::N_BINS; i++) {
+        if (hist[i] >= ori_thresh * ori_max) {
+            float prev = hist[(i - 1 + sift::N_BINS) % sift::N_BINS];
+            float next = hist[(i + 1) % sift::N_BINS];
+            if (prev > hist[i] || next > hist[i]) {
                 // deviceOrientations[tid * sift::N_BINS + j] = -1.0f;
                 continue;
             };
 
-            // Quadratic interpolation for peak
-            // float interp = 0.5f * (prev - next) / (prev - 2.0f * hist[j] + next);
-            // float theta = 2.0f * M_PI * (j + interp + 0.5f) / sift::N_BINS;
-            float theta = 2*M_PI*(j+1)/sift::N_BINS + M_PI/sift::N_BINS*(prev-next)/(prev-2*hist[j]+next);
-            deviceOrientations[tid * sift::N_BINS + j] = theta;
+            float theta = 2*M_PI*(i+1)/sift::N_BINS + M_PI/sift::N_BINS*(prev-next)/(prev-2*hist[i]+next);
+            deviceOrientations[tid * sift::N_BINS + i] = theta;
         }
     }
 }
