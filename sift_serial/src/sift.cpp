@@ -193,7 +193,8 @@ bool refine_or_discard_keypoint(Keypoint& kp, const std::vector<Image>& octave,
     int k = 0;
     bool kp_is_valid = false; 
     while (k++ < MAX_REFINEMENT_ITERS) {
-        auto [offset_s, offset_x, offset_y] = fit_quadratic(kp, octave, kp.scale);
+        float offset_s, offset_x, offset_y;
+        std::tie(offset_s, offset_x, offset_y) = fit_quadratic(kp, octave, kp.scale);
 
         float max_offset = std::max({std::abs(offset_s),
                                      std::abs(offset_x),
