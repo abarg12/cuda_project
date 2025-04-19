@@ -66,7 +66,7 @@ std::vector<Keypoint> find_keypoints(const ScaleSpacePyramid& dog_pyramid,
                                      float contrast_thresh=C_DOG, float edge_thresh=C_EDGE);
 
 std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog_pyramid,
-                                     float contrast_thresh=C_DOG, float edge_thresh=C_EDGE);
+                                     float contrast_thresh=C_DOG, float edge_thresh=C_EDGE);                      
 
 ScaleSpacePyramid generate_gradient_pyramid(const ScaleSpacePyramid& pyramid);
 
@@ -86,6 +86,12 @@ void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kps,
                                                 std::vector<float> thetas,
                                                 const ScaleSpacePyramid& grad_pyramid,
                                                 float lambda_desc=LAMBDA_DESC);
+
+// Finds the keypoint orientations and descriptors in a single kernel
+std::vector<std::vector<float>> find_ori_desc_parallel_optimized(std::vector<Keypoint>& kps,
+                                                             const ScaleSpacePyramid& grad_pyramid,
+                                                             float lambda_ori=LAMBDA_ORI,
+                                                             float lambda_desc=LAMBDA_DESC);
 
 
 std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sigma_min=SIGMA_MIN,
