@@ -29,6 +29,10 @@ inline void gpuAssert(cudaError_t code, const char *file, int line,
 
 namespace sift {
 
+
+/*****************************************************************************/
+/************************* SECTION 1: SERIAL FUNCTIONS ***********************/ 
+
 ScaleSpacePyramid generate_gaussian_pyramid(const Image& img, float sigma_min,
                                             int num_octaves, int scales_per_octave)
 {
@@ -260,103 +264,6 @@ std::vector<Keypoint> find_keypoints(const ScaleSpacePyramid& dog_pyramid, float
     return keypoints;
 }
 
-std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog_pyramid,
-                                                    float contrast_thresh,
-                                                    float edge_thresh)
-{
-    std::vector<Keypoint> keypoints;
-    for (int i = 0; i < dog_pyramid.num_octaves; i++) {
-        const std::vector<Image>& octave = dog_pyramid.octaves[i];
-        for (int j = 1; j < dog_pyramid.imgs_per_octave-1; j++) {
-            const Image &img = octave[j];
-            const Image &img_down = octave[j - 1];
-            const Image &img_up = octave[j + 1];
-
-
-            // Allocate device memory for the image at 3 different scales
-            // the 3 scales get compared for identifying keypoints
-            int img_size_b = img.size * sizeof(float); 
-            float *deviceImage;
-            CUDA_CHECK(
-                cudaMalloc((void **) &deviceImage, img_size_b * 3)
-            );
-            // Copy over host images to device memory
-            CUDA_CHECK(
-                cudaMemcpy(deviceImage,
-                           img.data,
-                           img_size_b,
-                           cudaMemcpyHostToDevice)
-            );
-            CUDA_CHECK(
-                cudaMemcpy(deviceImage + img.size,
-                           img_down.data,
-                           img_size_b,
-                           cudaMemcpyHostToDevice)
-            );
-            CUDA_CHECK(
-                cudaMemcpy(deviceImage + 2 * img.size,
-                           img_up.data,
-                           img_size_b,
-                           cudaMemcpyHostToDevice)
-            );
-
-            // Allocate device memory for output buffer which is an array with
-            // the same size as the image where a 0 indicates a non-keypoint at
-            // the corresponding pixel position and a 1 indicates a keypoint
-            unsigned int *deviceKeypointOutput;
-            unsigned int *hostKeypointOutput = new unsigned int[img.size];
-            
-            CUDA_CHECK(
-                cudaMalloc((void **) &deviceKeypointOutput, img.size * sizeof(int))
-            );
-            // reset keypoint indicator buffer to all 0s
-            CUDA_CHECK(
-                cudaMemset(deviceKeypointOutput, 0, img.size * sizeof(int))
-            );
-
-            dim3 blockDim(512);
-            dim3 gridDim((img.size + blockDim.x - 1) / blockDim.x);
-            identify_keypoints<<<gridDim, blockDim>>>(deviceImage,
-                                                      deviceKeypointOutput,
-                                                      img.size,
-                                                      img.width,
-                                                      contrast_thresh);
-
-            CUDA_CHECK(
-                cudaMemcpy(hostKeypointOutput,
-                           deviceKeypointOutput,
-                           img.size * sizeof(int),
-                           cudaMemcpyDeviceToHost)
-            );
-
-            int totalkp = 0;
-            for (int ind = 0; ind < img.size; ind++) {
-                if (hostKeypointOutput[ind]) {
-                    totalkp++;
-                }
-            }
-
-            for (int x = 1; x < img.width-1; x++) {
-                for (int y = 1; y < img.height-1; y++) {
-                    int img_idx = x + y * img.width;
-                    if (hostKeypointOutput[img_idx]) {
-                        Keypoint kp = {x, y, i, j, -1, -1, -1, -1};
-                        bool kp_is_valid = refine_or_discard_keypoint(kp, octave, contrast_thresh,
-                                                                      edge_thresh);
-                        if (kp_is_valid) {
-                            keypoints.push_back(kp);
-                        }
-                    }
-                }
-            }
-
-            CUDA_CHECK(cudaFree(deviceImage));
-            CUDA_CHECK(cudaFree(deviceKeypointOutput));
-            delete[] hostKeypointOutput;
-        }
-    }
-    return keypoints;
-}
 
 // calculate x and y derivatives for all images in the input pyramid
 ScaleSpacePyramid generate_gradient_pyramid(const ScaleSpacePyramid& pyramid)
@@ -464,6 +371,287 @@ std::vector<float> find_keypoint_orientations(Keypoint& kp,
     }
     return orientations;
 }
+
+
+void update_histograms(float hist[N_HIST][N_HIST][N_ORI], float x, float y,
+                       float contrib, float theta_mn, float lambda_desc)
+{
+    float x_i, y_j;
+    for (int i = 1; i <= N_HIST; i++) {
+        x_i = (i-(1+(float)N_HIST)/2) * 2*lambda_desc/N_HIST;
+        if (std::abs(x_i-x) > 2*lambda_desc/N_HIST)
+            continue;
+        for (int j = 1; j <= N_HIST; j++) {
+            y_j = (j-(1+(float)N_HIST)/2) * 2*lambda_desc/N_HIST;
+            if (std::abs(y_j-y) > 2*lambda_desc/N_HIST)
+                continue;
+            
+            float hist_weight = (1 - N_HIST*0.5/lambda_desc*std::abs(x_i-x))
+                               *(1 - N_HIST*0.5/lambda_desc*std::abs(y_j-y));
+
+            for (int k = 1; k <= N_ORI; k++) {
+                float theta_k = 2*M_PI*(k-1)/N_ORI;
+                float theta_diff = std::fmod(theta_k-theta_mn+2*M_PI, 2*M_PI);
+                if (std::abs(theta_diff) >= 2*M_PI/N_ORI)
+                    continue;
+                float bin_weight = 1 - N_ORI*0.5/M_PI*std::abs(theta_diff);
+                hist[i-1][j-1][k-1] += hist_weight*bin_weight*contrib;
+            }
+        }
+    }
+}
+
+void hists_to_vec(float histograms[N_HIST][N_HIST][N_ORI], std::array<uint8_t, 128>& feature_vec)
+{
+    int size = N_HIST*N_HIST*N_ORI;
+    float *hist = reinterpret_cast<float *>(histograms);
+
+    float norm = 0;
+    for (int i = 0; i < size; i++) {
+        norm += hist[i] * hist[i];
+    }
+    norm = std::sqrt(norm);
+    float norm2 = 0;
+    for (int i = 0; i < size; i++) {
+        hist[i] = std::min(hist[i], 0.2f*norm);
+        norm2 += hist[i] * hist[i];
+    }
+    norm2 = std::sqrt(norm2);
+    for (int i = 0; i < size; i++) {
+        float val = std::floor(512*hist[i]/norm2);
+        feature_vec[i] = std::min((int)val, 255);
+    }
+}
+
+void compute_keypoint_descriptor(Keypoint& kp, float theta,
+                                 const ScaleSpacePyramid& grad_pyramid,
+                                 float lambda_desc)
+{
+    float pix_dist = MIN_PIX_DIST * std::pow(2, kp.octave);
+    const Image& img_grad = grad_pyramid.octaves[kp.octave][kp.scale];
+    float histograms[N_HIST][N_HIST][N_ORI] = {0};
+
+    //find start and end coords for loops over image patch
+    float half_size = std::sqrt(2)*lambda_desc*kp.sigma*(N_HIST+1.)/N_HIST;
+    int x_start = std::round((kp.x-half_size) / pix_dist);
+    int x_end = std::round((kp.x+half_size) / pix_dist);
+    int y_start = std::round((kp.y-half_size) / pix_dist);
+    int y_end = std::round((kp.y+half_size) / pix_dist);
+
+    float cos_t = std::cos(theta), sin_t = std::sin(theta);
+    float patch_sigma = lambda_desc * kp.sigma;
+    //accumulate samples into histograms
+    for (int m = x_start; m <= x_end; m++) {
+        for (int n = y_start; n <= y_end; n++) {
+            // find normalized coords w.r.t. kp position and reference orientation
+            float x = ((m*pix_dist - kp.x)*cos_t
+                      +(n*pix_dist - kp.y)*sin_t) / kp.sigma;
+            float y = (-(m*pix_dist - kp.x)*sin_t
+                       +(n*pix_dist - kp.y)*cos_t) / kp.sigma;
+
+            // verify (x, y) is inside the description patch
+            if (std::max(std::abs(x), std::abs(y)) > lambda_desc*(N_HIST+1.)/N_HIST)
+                continue;
+
+            float gx = img_grad.get_pixel(m, n, 0), gy = img_grad.get_pixel(m, n, 1);
+            float theta_mn = std::fmod(std::atan2(gy, gx)-theta+4*M_PI, 2*M_PI);
+            float grad_norm = std::sqrt(gx*gx + gy*gy);
+            float weight = std::exp(-(std::pow(m*pix_dist-kp.x, 2)+std::pow(n*pix_dist-kp.y, 2))
+                                    /(2*patch_sigma*patch_sigma));
+            float contribution = weight * grad_norm;
+
+            update_histograms(histograms, x, y, contribution, theta_mn, lambda_desc);
+        }
+    }
+
+    // build feature vector (descriptor) from histograms
+    hists_to_vec(histograms, kp.descriptor);
+}
+
+
+float euclidean_dist(std::array<uint8_t, 128>& a, std::array<uint8_t, 128>& b)
+{
+    float dist = 0;
+    for (int i = 0; i < 128; i++) {
+        int di = (int)a[i] - b[i];
+        dist += di * di;
+    }
+    return std::sqrt(dist);
+}
+
+std::vector<std::pair<int, int>> find_keypoint_matches(std::vector<Keypoint>& a,
+                                                       std::vector<Keypoint>& b,
+                                                       float thresh_relative,
+                                                       float thresh_absolute)
+{
+    assert(a.size() >= 2 && b.size() >= 2);
+
+    std::vector<std::pair<int, int>> matches;
+
+    for (int i = 0; i < a.size(); i++) {
+        // find two nearest neighbours in b for current keypoint from a
+        int nn1_idx = -1;
+        float nn1_dist = 100000000, nn2_dist = 100000000;
+        for (int j = 0; j < b.size(); j++) {
+            float dist = euclidean_dist(a[i].descriptor, b[j].descriptor);
+            if (dist < nn1_dist) {
+                nn2_dist = nn1_dist;
+                nn1_dist = dist;
+                nn1_idx = j;
+            } else if (nn1_dist <= dist && dist < nn2_dist) {
+                nn2_dist = dist;
+            }
+        }
+        if (nn1_dist < thresh_relative*nn2_dist && nn1_dist < thresh_absolute) {
+            matches.push_back({i, nn1_idx});
+        }
+    }
+    return matches;
+}
+
+Image draw_keypoints(const Image& img, const std::vector<Keypoint>& kps)
+{
+    Image res(img);
+    if (img.channels == 1) {
+        res = grayscale_to_rgb(res);
+    }
+    for (auto& kp : kps) {
+        draw_point(res, kp.x, kp.y, 5);
+    }
+    return res;
+}
+
+Image draw_matches(const Image& a, const Image& b, std::vector<Keypoint>& kps_a,
+                   std::vector<Keypoint>& kps_b, std::vector<std::pair<int, int>> matches)
+{
+    Image res(a.width+b.width, std::max(a.height, b.height), 3);
+
+    for (int i = 0; i < a.width; i++) {
+        for (int j = 0; j < a.height; j++) {
+            res.set_pixel(i, j, 0, a.get_pixel(i, j, 0));
+            res.set_pixel(i, j, 1, a.get_pixel(i, j, a.channels == 3 ? 1 : 0));
+            res.set_pixel(i, j, 2, a.get_pixel(i, j, a.channels == 3 ? 2 : 0));
+        }
+    }
+    for (int i = 0; i < b.width; i++) {
+        for (int j = 0; j < b.height; j++) {
+            res.set_pixel(a.width+i, j, 0, b.get_pixel(i, j, 0));
+            res.set_pixel(a.width+i, j, 1, b.get_pixel(i, j, b.channels == 3 ? 1 : 0));
+            res.set_pixel(a.width+i, j, 2, b.get_pixel(i, j, b.channels == 3 ? 2 : 0));
+        }
+    }
+
+    for (auto& m : matches) {
+        Keypoint& kp_a = kps_a[m.first];
+        Keypoint& kp_b = kps_b[m.second];
+        draw_line(res, kp_a.x, kp_a.y, a.width+kp_b.x, kp_b.y);
+    }
+    return res;
+}
+
+
+
+/*****************************************************************************/
+/******************* SECTION 2: NAIVE CUDA HOST CODE *************************/
+
+std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog_pyramid,
+                                                    float contrast_thresh,
+                                                    float edge_thresh)
+{
+    std::vector<Keypoint> keypoints;
+    for (int i = 0; i < dog_pyramid.num_octaves; i++) {
+        const std::vector<Image>& octave = dog_pyramid.octaves[i];
+        for (int j = 1; j < dog_pyramid.imgs_per_octave-1; j++) {
+            const Image &img = octave[j];
+            const Image &img_down = octave[j - 1];
+            const Image &img_up = octave[j + 1];
+
+
+            // Allocate device memory for the image at 3 different scales
+            // the 3 scales get compared for identifying keypoints
+            int img_size_b = img.size * sizeof(float); 
+            float *deviceImage;
+            CUDA_CHECK(
+                cudaMalloc((void **) &deviceImage, img_size_b * 3)
+            );
+            // Copy over host images to device memory
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage,
+                           img.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            );
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage + img.size,
+                           img_down.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            );
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage + 2 * img.size,
+                           img_up.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            );
+
+            // Allocate device memory for output buffer which is an array with
+            // the same size as the image where a 0 indicates a non-keypoint at
+            // the corresponding pixel position and a 1 indicates a keypoint
+            unsigned int *deviceKeypointOutput;
+            unsigned int *hostKeypointOutput = new unsigned int[img.size];
+            
+            CUDA_CHECK(
+                cudaMalloc((void **) &deviceKeypointOutput, img.size * sizeof(int))
+            );
+            // reset keypoint indicator buffer to all 0s
+            CUDA_CHECK(
+                cudaMemset(deviceKeypointOutput, 0, img.size * sizeof(int))
+            );
+
+            dim3 blockDim(512);
+            dim3 gridDim((img.size + blockDim.x - 1) / blockDim.x);
+            identify_keypoints<<<gridDim, blockDim>>>(deviceImage,
+                                                      deviceKeypointOutput,
+                                                      img.size,
+                                                      img.width,
+                                                      contrast_thresh);
+
+            CUDA_CHECK(
+                cudaMemcpy(hostKeypointOutput,
+                           deviceKeypointOutput,
+                           img.size * sizeof(int),
+                           cudaMemcpyDeviceToHost)
+            );
+
+            int totalkp = 0;
+            for (int ind = 0; ind < img.size; ind++) {
+                if (hostKeypointOutput[ind]) {
+                    totalkp++;
+                }
+            }
+
+            for (int x = 1; x < img.width-1; x++) {
+                for (int y = 1; y < img.height-1; y++) {
+                    int img_idx = x + y * img.width;
+                    if (hostKeypointOutput[img_idx]) {
+                        Keypoint kp = {x, y, i, j, -1, -1, -1, -1};
+                        bool kp_is_valid = refine_or_discard_keypoint(kp, octave, contrast_thresh,
+                                                                      edge_thresh);
+                        if (kp_is_valid) {
+                            keypoints.push_back(kp);
+                        }
+                    }
+                }
+            }
+
+            CUDA_CHECK(cudaFree(deviceImage));
+            CUDA_CHECK(cudaFree(deviceKeypointOutput));
+            delete[] hostKeypointOutput;
+        }
+    }
+    return keypoints;
+}
+
 
 std::vector<std::vector<float>> find_keypoint_orientations_parallel_naive(std::vector<Keypoint>& kps,
                                                                           const ScaleSpacePyramid& grad_pyramid,
@@ -588,101 +776,6 @@ std::vector<std::vector<float>> find_keypoint_orientations_parallel_naive(std::v
     delete[] hostOrientations;
 
     return orientation_outvec;
-}
-
-void update_histograms(float hist[N_HIST][N_HIST][N_ORI], float x, float y,
-                       float contrib, float theta_mn, float lambda_desc)
-{
-    float x_i, y_j;
-    for (int i = 1; i <= N_HIST; i++) {
-        x_i = (i-(1+(float)N_HIST)/2) * 2*lambda_desc/N_HIST;
-        if (std::abs(x_i-x) > 2*lambda_desc/N_HIST)
-            continue;
-        for (int j = 1; j <= N_HIST; j++) {
-            y_j = (j-(1+(float)N_HIST)/2) * 2*lambda_desc/N_HIST;
-            if (std::abs(y_j-y) > 2*lambda_desc/N_HIST)
-                continue;
-            
-            float hist_weight = (1 - N_HIST*0.5/lambda_desc*std::abs(x_i-x))
-                               *(1 - N_HIST*0.5/lambda_desc*std::abs(y_j-y));
-
-            for (int k = 1; k <= N_ORI; k++) {
-                float theta_k = 2*M_PI*(k-1)/N_ORI;
-                float theta_diff = std::fmod(theta_k-theta_mn+2*M_PI, 2*M_PI);
-                if (std::abs(theta_diff) >= 2*M_PI/N_ORI)
-                    continue;
-                float bin_weight = 1 - N_ORI*0.5/M_PI*std::abs(theta_diff);
-                hist[i-1][j-1][k-1] += hist_weight*bin_weight*contrib;
-            }
-        }
-    }
-}
-
-void hists_to_vec(float histograms[N_HIST][N_HIST][N_ORI], std::array<uint8_t, 128>& feature_vec)
-{
-    int size = N_HIST*N_HIST*N_ORI;
-    float *hist = reinterpret_cast<float *>(histograms);
-
-    float norm = 0;
-    for (int i = 0; i < size; i++) {
-        norm += hist[i] * hist[i];
-    }
-    norm = std::sqrt(norm);
-    float norm2 = 0;
-    for (int i = 0; i < size; i++) {
-        hist[i] = std::min(hist[i], 0.2f*norm);
-        norm2 += hist[i] * hist[i];
-    }
-    norm2 = std::sqrt(norm2);
-    for (int i = 0; i < size; i++) {
-        float val = std::floor(512*hist[i]/norm2);
-        feature_vec[i] = std::min((int)val, 255);
-    }
-}
-
-void compute_keypoint_descriptor(Keypoint& kp, float theta,
-                                 const ScaleSpacePyramid& grad_pyramid,
-                                 float lambda_desc)
-{
-    float pix_dist = MIN_PIX_DIST * std::pow(2, kp.octave);
-    const Image& img_grad = grad_pyramid.octaves[kp.octave][kp.scale];
-    float histograms[N_HIST][N_HIST][N_ORI] = {0};
-
-    //find start and end coords for loops over image patch
-    float half_size = std::sqrt(2)*lambda_desc*kp.sigma*(N_HIST+1.)/N_HIST;
-    int x_start = std::round((kp.x-half_size) / pix_dist);
-    int x_end = std::round((kp.x+half_size) / pix_dist);
-    int y_start = std::round((kp.y-half_size) / pix_dist);
-    int y_end = std::round((kp.y+half_size) / pix_dist);
-
-    float cos_t = std::cos(theta), sin_t = std::sin(theta);
-    float patch_sigma = lambda_desc * kp.sigma;
-    //accumulate samples into histograms
-    for (int m = x_start; m <= x_end; m++) {
-        for (int n = y_start; n <= y_end; n++) {
-            // find normalized coords w.r.t. kp position and reference orientation
-            float x = ((m*pix_dist - kp.x)*cos_t
-                      +(n*pix_dist - kp.y)*sin_t) / kp.sigma;
-            float y = (-(m*pix_dist - kp.x)*sin_t
-                       +(n*pix_dist - kp.y)*cos_t) / kp.sigma;
-
-            // verify (x, y) is inside the description patch
-            if (std::max(std::abs(x), std::abs(y)) > lambda_desc*(N_HIST+1.)/N_HIST)
-                continue;
-
-            float gx = img_grad.get_pixel(m, n, 0), gy = img_grad.get_pixel(m, n, 1);
-            float theta_mn = std::fmod(std::atan2(gy, gx)-theta+4*M_PI, 2*M_PI);
-            float grad_norm = std::sqrt(gx*gx + gy*gy);
-            float weight = std::exp(-(std::pow(m*pix_dist-kp.x, 2)+std::pow(n*pix_dist-kp.y, 2))
-                                    /(2*patch_sigma*patch_sigma));
-            float contribution = weight * grad_norm;
-
-            update_histograms(histograms, x, y, contribution, theta_mn, lambda_desc);
-        }
-    }
-
-    // build feature vector (descriptor) from histograms
-    hists_to_vec(histograms, kp.descriptor);
 }
 
 
@@ -810,11 +903,17 @@ void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kps,
 }
 
 
+/*****************************************************************************/
+/****************** SECTION 3: OPTIMIZED CUDA HOST CODE **********************/
 
-/******************************************************************************
-* The serial 'main' function which calls all necessary functions to compute the
-* keypoints and descriptors.
-******************************************************************************/
+
+/*****************************************************************************/
+/***** SECTION 4: SIFT 'MAIN' FUNCTION (find_keypoints_and_descriptors) ******/
+
+/*
+ * The serial 'main' function which calls all necessary functions to compute the
+ * keypoints and descriptors.
+ */
 std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sigma_min,
                                                      int num_octaves, int scales_per_octave, 
                                                      float contrast_thresh, float edge_thresh, 
@@ -876,10 +975,10 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
     return kps;
 }
 
-/******************************************************************************
-* The parallel 'main' function which calls all necessary functions to compute
-* the keypoints and descriptors.
-******************************************************************************/
+/*
+ * The parallel 'main' function which calls all necessary functions to compute
+ * the keypoints and descriptors. This calls the CUDA parallel implementations.
+ */
 std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
     const Image& img,
     float sigma_min,
@@ -968,10 +1067,10 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
 }
 
 
-/******************************************************************************
-* The parallel 'main' function which calls all necessary functions to compute
-* the keypoints and descriptors.
-******************************************************************************/
+/*
+ * The parallel 'main' function which calls all necessary functions to compute
+ * the keypoints and descriptors. This calls the optimized CUDA implementation.
+ */
 std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
     const Image& img,
     float sigma_min,
@@ -1051,87 +1150,6 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
     cudaEventDestroy(stopEvent);
 
     return kps;
-}
-
-
-float euclidean_dist(std::array<uint8_t, 128>& a, std::array<uint8_t, 128>& b)
-{
-    float dist = 0;
-    for (int i = 0; i < 128; i++) {
-        int di = (int)a[i] - b[i];
-        dist += di * di;
-    }
-    return std::sqrt(dist);
-}
-
-std::vector<std::pair<int, int>> find_keypoint_matches(std::vector<Keypoint>& a,
-                                                       std::vector<Keypoint>& b,
-                                                       float thresh_relative,
-                                                       float thresh_absolute)
-{
-    assert(a.size() >= 2 && b.size() >= 2);
-
-    std::vector<std::pair<int, int>> matches;
-
-    for (int i = 0; i < a.size(); i++) {
-        // find two nearest neighbours in b for current keypoint from a
-        int nn1_idx = -1;
-        float nn1_dist = 100000000, nn2_dist = 100000000;
-        for (int j = 0; j < b.size(); j++) {
-            float dist = euclidean_dist(a[i].descriptor, b[j].descriptor);
-            if (dist < nn1_dist) {
-                nn2_dist = nn1_dist;
-                nn1_dist = dist;
-                nn1_idx = j;
-            } else if (nn1_dist <= dist && dist < nn2_dist) {
-                nn2_dist = dist;
-            }
-        }
-        if (nn1_dist < thresh_relative*nn2_dist && nn1_dist < thresh_absolute) {
-            matches.push_back({i, nn1_idx});
-        }
-    }
-    return matches;
-}
-
-Image draw_keypoints(const Image& img, const std::vector<Keypoint>& kps)
-{
-    Image res(img);
-    if (img.channels == 1) {
-        res = grayscale_to_rgb(res);
-    }
-    for (auto& kp : kps) {
-        draw_point(res, kp.x, kp.y, 5);
-    }
-    return res;
-}
-
-Image draw_matches(const Image& a, const Image& b, std::vector<Keypoint>& kps_a,
-                   std::vector<Keypoint>& kps_b, std::vector<std::pair<int, int>> matches)
-{
-    Image res(a.width+b.width, std::max(a.height, b.height), 3);
-
-    for (int i = 0; i < a.width; i++) {
-        for (int j = 0; j < a.height; j++) {
-            res.set_pixel(i, j, 0, a.get_pixel(i, j, 0));
-            res.set_pixel(i, j, 1, a.get_pixel(i, j, a.channels == 3 ? 1 : 0));
-            res.set_pixel(i, j, 2, a.get_pixel(i, j, a.channels == 3 ? 2 : 0));
-        }
-    }
-    for (int i = 0; i < b.width; i++) {
-        for (int j = 0; j < b.height; j++) {
-            res.set_pixel(a.width+i, j, 0, b.get_pixel(i, j, 0));
-            res.set_pixel(a.width+i, j, 1, b.get_pixel(i, j, b.channels == 3 ? 1 : 0));
-            res.set_pixel(a.width+i, j, 2, b.get_pixel(i, j, b.channels == 3 ? 2 : 0));
-        }
-    }
-
-    for (auto& m : matches) {
-        Keypoint& kp_a = kps_a[m.first];
-        Keypoint& kp_b = kps_b[m.second];
-        draw_line(res, kp_a.x, kp_a.y, a.width+kp_b.x, kp_b.y);
-    }
-    return res;
 }
 
 } // namespace sift
