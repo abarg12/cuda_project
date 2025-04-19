@@ -82,7 +82,7 @@ void compute_keypoint_descriptor(Keypoint& kp, float theta, const ScaleSpacePyra
                                  float lambda_desc=LAMBDA_DESC);
 
 
-void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kp,
+void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kps,
                                                 std::vector<float> thetas,
                                                 const ScaleSpacePyramid& grad_pyramid,
                                                 float lambda_desc=LAMBDA_DESC);

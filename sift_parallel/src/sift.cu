@@ -686,50 +686,127 @@ void compute_keypoint_descriptor(Keypoint& kp, float theta,
 }
 
 
-void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kp,
-                                                std::vector<float> theta,
+void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kps,
+                                                std::vector<float> thetas,
                                                 const ScaleSpacePyramid& grad_pyramid,
                                                 float lambda_desc)
 {
-    // float pix_dist = MIN_PIX_DIST * std::pow(2, kp.octave);
-    // const Image& img_grad = grad_pyramid.octaves[kp.octave][kp.scale];
-    // float histograms[N_HIST][N_HIST][N_ORI] = {0};
+    int pyramidOneDimSize = 0;
+    for (int i = 0; i < grad_pyramid.num_octaves; i++) {
+        for (int j = 0; j < grad_pyramid.imgs_per_octave; j++) {
+            pyramidOneDimSize += grad_pyramid.octaves[i][j].size;
+        }
+    }
 
-    // //find start and end coords for loops over image patch
-    // float half_size = std::sqrt(2)*lambda_desc*kp.sigma*(N_HIST+1.)/N_HIST;
-    // int x_start = std::round((kp.x-half_size) / pix_dist);
-    // int x_end = std::round((kp.x+half_size) / pix_dist);
-    // int y_start = std::round((kp.y-half_size) / pix_dist);
-    // int y_end = std::round((kp.y+half_size) / pix_dist);
+    // Allocate global memory to hold the input gradient pyramid
+    float *devicePyramid;
+    CUDA_CHECK(
+        cudaMalloc((void**) &devicePyramid, pyramidOneDimSize * sizeof(float)));
 
-    // float cos_t = std::cos(theta), sin_t = std::sin(theta);
-    // float patch_sigma = lambda_desc * kp.sigma;
-    // //accumulate samples into histograms
-    // for (int m = x_start; m <= x_end; m++) {
-    //     for (int n = y_start; n <= y_end; n++) {
-    //         // find normalized coords w.r.t. kp position and reference orientation
-    //         float x = ((m*pix_dist - kp.x)*cos_t
-    //                   +(n*pix_dist - kp.y)*sin_t) / kp.sigma;
-    //         float y = (-(m*pix_dist - kp.x)*sin_t
-    //                    +(n*pix_dist - kp.y)*cos_t) / kp.sigma;
+    // Copy gradient pyramid data into global memory
+    int image_idx = 0;
+    for (int i = 0; i < grad_pyramid.num_octaves; i++) {
+        for (int j = 0; j < grad_pyramid.imgs_per_octave; j++) {
+            CUDA_CHECK(
+                cudaMemcpy(devicePyramid + image_idx,
+                           grad_pyramid.octaves[i][j].data,
+                           grad_pyramid.octaves[i][j].size * sizeof(float),
+                           cudaMemcpyHostToDevice));
+            image_idx += grad_pyramid.octaves[i][j].size;
+        }
+    }
 
-    //         // verify (x, y) is inside the description patch
-    //         if (std::max(std::abs(x), std::abs(y)) > lambda_desc*(N_HIST+1.)/N_HIST)
-    //             continue;
+    
+    // Allocate global memory and host memory to hold keypoints
+    Keypoint *deviceKeypoints;
+    uint8_t *deviceKeypointDescriptors;
+    CUDA_CHECK(
+        cudaMalloc((void **) &deviceKeypoints, kps.size() * sizeof(Keypoint)));
+    Keypoint *hostKeypoints = kps.data();
+    // Copy keypoints from host to device memory
+    CUDA_CHECK(
+        cudaMemcpy(deviceKeypoints, hostKeypoints, 
+                   kps.size() * sizeof(Keypoint), cudaMemcpyHostToDevice));
 
-    //         float gx = img_grad.get_pixel(m, n, 0), gy = img_grad.get_pixel(m, n, 1);
-    //         float theta_mn = std::fmod(std::atan2(gy, gx)-theta+4*M_PI, 2*M_PI);
-    //         float grad_norm = std::sqrt(gx*gx + gy*gy);
-    //         float weight = std::exp(-(std::pow(m*pix_dist-kp.x, 2)+std::pow(n*pix_dist-kp.y, 2))
-    //                                 /(2*patch_sigma*patch_sigma));
-    //         float contribution = weight * grad_norm;
+    // Allocate device memory for each keypoint's descriptor
+    CUDA_CHECK(
+        cudaMalloc((void **) &deviceKeypointDescriptors, kps.size() * 128 * sizeof(uint8_t)));
+    // Zero out device memory
+    CUDA_CHECK(
+        cudaMemset(deviceKeypointDescriptors, 0, kps.size() * 128 * sizeof(uint8_t)));
 
-    //         update_histograms(histograms, x, y, contribution, theta_mn, lambda_desc);
-    //     }
-    // }
+
+    // Allocate global memory for thetas
+    float *deviceThetas;
+    CUDA_CHECK(
+        cudaMalloc((void **) &deviceThetas, thetas.size() * sizeof(float)));
+    // Copy host thetas to global memory
+    CUDA_CHECK(
+        cudaMemcpy(deviceThetas, thetas.data(),
+                   thetas.size() * sizeof(float), cudaMemcpyHostToDevice));
+
+    // Compute image dimensions in order to index into the gradient pyramid
+    int total_images = grad_pyramid.num_octaves * grad_pyramid.imgs_per_octave;
+    std::vector<int> imageOffsets(total_images);
+    std::vector<int> imageWidths(total_images);
+    std::vector<int> imageHeights(total_images);
+    int *deviceImgOffsets, *deviceImgWidths, *deviceImgHeights;
+    CUDA_CHECK(
+        cudaMalloc((void **) &deviceImgOffsets, total_images * sizeof(int)));
+    CUDA_CHECK(
+        cudaMalloc((void **) &deviceImgWidths, total_images * sizeof(int)));
+    CUDA_CHECK(
+        cudaMalloc((void **) &deviceImgHeights, total_images * sizeof(int)));
+
+    int offset = 0;
+    int idx = 0;
+    for (int i = 0; i < grad_pyramid.num_octaves; i++) {
+        for (int j = 0; j < grad_pyramid.imgs_per_octave; j++) {
+            const Image& img = grad_pyramid.octaves[i][j];
+            imageOffsets[idx] = offset;
+            imageWidths[idx] = img.width;
+            imageHeights[idx] = img.height;
+            offset += img.size;
+            idx++;
+        }
+    }
+
+    CUDA_CHECK(
+        cudaMemcpy(deviceImgOffsets, imageOffsets.data(), total_images * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(
+        cudaMemcpy(deviceImgWidths, imageWidths.data(), total_images * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(
+        cudaMemcpy(deviceImgHeights, imageHeights.data(), total_images * sizeof(int), cudaMemcpyHostToDevice));
+
+
+    dim3 blockDim(64);
+    dim3 gridDim((kps.size() + blockDim.x - 1) / blockDim.x);
+    generate_descriptors_naive<<<gridDim, blockDim>>>(devicePyramid,
+                                                       deviceKeypoints,
+                                                       deviceKeypointDescriptors,
+                                                       deviceThetas,
+                                                       deviceImgOffsets,
+                                                       deviceImgWidths,
+                                                       deviceImgHeights,
+                                                       kps.size(),
+                                                       grad_pyramid.imgs_per_octave,
+                                                       lambda_desc);
+
+    // Copy the descriptors back from the device
+    for (size_t i = 0; i < kps.size(); ++i) {
+        CUDA_CHECK(cudaMemcpy(kps[i].descriptor.data(), deviceKeypointDescriptors + i * 128,
+                             128 * sizeof(uint8_t), cudaMemcpyDeviceToHost));
+    }
 
     // // build feature vector (descriptor) from histograms
     // hists_to_vec(histograms, kp.descriptor);
+    CUDA_CHECK(cudaFree(devicePyramid));
+    CUDA_CHECK(cudaFree(deviceKeypoints));
+    CUDA_CHECK(cudaFree(deviceKeypointDescriptors));
+    CUDA_CHECK(cudaFree(deviceThetas));
+    CUDA_CHECK(cudaFree(deviceImgOffsets));
+    CUDA_CHECK(cudaFree(deviceImgWidths));
+    CUDA_CHECK(cudaFree(deviceImgHeights));
 }
 
 
