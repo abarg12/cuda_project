@@ -1044,13 +1044,14 @@ std::vector<Keypoint> find_ori_desc_parallel_opt(std::vector<Keypoint>& kps,
     for (int i = 0; i < kps.size(); i++) {
         for (int j = 0; j < N_BINS; j++) {
             if (hostOrientations[i * N_BINS + j] != 0.0) {
-                cudaMemcpy(deviceKeypointsNew + new_arr_index * sizeof(Keypoint),
-                            deviceKeypoints + i * sizeof(Keypoint),
+                cudaMemcpy(deviceKeypointsNew + new_arr_index,
+                            deviceKeypoints + i,
                             sizeof(Keypoint), cudaMemcpyDeviceToDevice);
-                cudaMemcpy(deviceOrientationsNew + new_arr_index * sizeof(float),
-                            deviceOrientations + (i * N_BINS + j) * sizeof(float),
+                cudaMemcpy(deviceOrientationsNew + new_arr_index ,
+                            deviceOrientations + (i * N_BINS + j),
                             sizeof(float), cudaMemcpyDeviceToDevice);
-                kps_out.push_back(kps[i]);
+                Keypoint kp = kps[i];
+                kps_out.push_back(kp);
                 new_arr_index++;
             }
         }
