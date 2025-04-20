@@ -87,11 +87,11 @@ void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kps,
                                                 const ScaleSpacePyramid& grad_pyramid,
                                                 float lambda_desc=LAMBDA_DESC);
 
-// Finds the keypoint orientations and descriptors in a single kernel
-std::vector<std::vector<float>> find_ori_desc_parallel_optimized(std::vector<Keypoint>& kps,
-                                                             const ScaleSpacePyramid& grad_pyramid,
-                                                             float lambda_ori=LAMBDA_ORI,
-                                                             float lambda_desc=LAMBDA_DESC);
+// calculates the orientations and descriptors in a single kernel
+std::vector<Keypoint> find_ori_desc_parallel_optimized(std::vector<Keypoint>& kps,
+                                                        const ScaleSpacePyramid& grad_pyramid,
+                                                        float lambda_ori=LAMBDA_ORI,
+                                                        float lambda_desc=LAMBDA_DESC);
 
 
 std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sigma_min=SIGMA_MIN,
