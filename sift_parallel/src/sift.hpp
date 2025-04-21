@@ -8,10 +8,6 @@
 
 #include "image.hpp"
 
-#ifndef M_PIf
-#define M_PIf 3.14159265358979323846f // Using a precise literal for float
-#endif
-
 namespace sift {
 
 struct ScaleSpacePyramid {
@@ -56,6 +52,12 @@ const float LAMBDA_ORI = 1.5;
 const int N_HIST = 4;
 const int N_ORI = 8;
 const float LAMBDA_DESC = 6;
+
+// New constants to support parallel workload
+// reduces rounding errors between serial and parallel code
+const float M_PIf = 3.14159265358979323846f;
+// used as the shared memory size in optimized descriptor kernel
+const int DESC_HIST_SHARED_SIZE = (N_HIST * N_HIST * N_ORI);
 
 // feature matching
 const float THRESH_ABSOLUTE = 350;

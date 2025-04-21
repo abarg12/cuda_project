@@ -124,8 +124,8 @@ __global__ void generate_orientations(float *devicePyramid,
                               powf(y * pix_dist - kp.y, 2.0f)) /
                             (2.0f * patch_sigma * patch_sigma));
 
-            theta = fmodf(atan2f(gy, gx) + 2.0f * M_PIf, 2.0f * M_PIf);
-            bin = ((int)roundf(sift::N_BINS / (2.0f * M_PIf) * theta)) % sift::N_BINS;
+            theta = fmodf(atan2f(gy, gx) + 2.0f * sift::M_PIf, 2.0f * sift::M_PIf);
+            bin = ((int)roundf(sift::N_BINS / (2.0f * sift::M_PIf) * theta)) % sift::N_BINS;
             hist[bin] += weight * grad_norm;
         }
     }
@@ -149,7 +149,7 @@ __global__ void generate_orientations(float *devicePyramid,
                 continue;
             }
 
-            float theta = 2.0f*M_PIf*(i+1.0f)/sift::N_BINS + M_PIf/sift::N_BINS*(prev-next)/(prev-2.0f*hist[i]+next);
+            float theta = 2.0f*sift::M_PIf*(i+1.0f)/sift::N_BINS + sift::M_PIf/sift::N_BINS*(prev-next)/(prev-2.0f*hist[i]+next);
             deviceOrientations[tid * sift::N_BINS + i] = theta;
         }
     }
@@ -174,11 +174,11 @@ __device__ void update_histograms_device(float* hist, float x, float y,
                               * (1.0f - sift::N_HIST * 0.5f / lambda_desc * fabsf(y_j - y));
 
             for (int k = 1; k <= sift::N_ORI; k++) {
-                float theta_k = 2.0f * M_PIf * (k - 1.0f) / sift::N_ORI;
-                float theta_diff = fmodf(theta_k - theta_mn + 2.0f * M_PIf, 2.0f * M_PIf);
-                if (fabsf(theta_diff) >= 2 * M_PIf / sift::N_ORI)
+                float theta_k = 2.0f * sift::M_PIf * (k - 1.0f) / sift::N_ORI;
+                float theta_diff = fmodf(theta_k - theta_mn + 2.0f * sift::M_PIf, 2.0f * sift::M_PIf);
+                if (fabsf(theta_diff) >= 2 * sift::M_PIf / sift::N_ORI)
                     continue;
-                float bin_weight = 1.0f - sift::N_ORI * 0.5f / M_PIf * fabsf(theta_diff);
+                float bin_weight = 1.0f - sift::N_ORI * 0.5f / sift::M_PIf * fabsf(theta_diff);
                 int hist_index = ((i - 1) * sift::N_HIST + (j - 1)) * sift::N_ORI + (k - 1);
                 hist[hist_index] += hist_weight * bin_weight * contrib;
             }
@@ -262,7 +262,7 @@ __global__ void generate_descriptors(float* devicePyramid,
             gx = devicePyramid[img_offset + idx];
             gy = devicePyramid[img_offset + idx + img_width * img_height];
             
-            theta_mn = fmodf(atan2f(gy, gx) - theta + 4.0f * M_PIf, 2.0f * M_PIf);
+            theta_mn = fmodf(atan2f(gy, gx) - theta + 4.0f * sift::M_PIf, 2.0f * sift::M_PIf);
             grad_norm = sqrtf(gx * gx + gy * gy);
             weight = expf(-(powf(m * pix_dist - kp.x, 2.0f) + powf(n * pix_dist - kp.y, 2.0f)) / (2.0f * patch_sigma * patch_sigma));
             contribution = weight * grad_norm;
@@ -334,8 +334,8 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
                               powf(y * pix_dist - kp.y, 2)) /
                             (2 * patch_sigma * patch_sigma));
 
-            theta = fmodf(atan2f(gy, gx) + 2 * M_PIf, 2 * M_PIf);
-            bin = ((int)roundf(sift::N_BINS / (2 * M_PIf) * theta)) % sift::N_BINS;
+            theta = fmodf(atan2f(gy, gx) + 2 * sift::M_PIf, 2 * sift::M_PIf);
+            bin = ((int)roundf(sift::N_BINS / (2 * sift::M_PIf) * theta)) % sift::N_BINS;
             hist[bin] += weight * grad_norm;
         }
     }
@@ -360,7 +360,7 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
                 continue;
             }
 
-            float theta = 2*M_PIf*(i+1)/sift::N_BINS + M_PIf/sift::N_BINS*(prev-next)/(prev-2*hist[i]+next);
+            float theta = 2*sift::M_PIf*(i+1)/sift::N_BINS + sift::M_PIf/sift::N_BINS*(prev-next)/(prev-2*hist[i]+next);
             deviceOrientations[tid * sift::N_BINS + i] = theta;
 
             half_size = sqrtf(2) * lambda_desc * kp.sigma * (sift::N_HIST + 1.0) / sift::N_HIST;
@@ -392,7 +392,7 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
                     gx = devicePyramid[img_offset + idx];
                     gy = devicePyramid[img_offset + idx + img_width * img_height];
                     
-                    theta_mn = fmodf(atan2f(gy, gx) - theta + 4 * M_PIf, 2 * M_PIf);
+                    theta_mn = fmodf(atan2f(gy, gx) - theta + 4 * sift::M_PIf, 2 * sift::M_PIf);
                     grad_norm = sqrtf(gx * gx + gy * gy);
                     weight = expf(-(powf(m * pix_dist - kp.x, 2) + powf(n * pix_dist - kp.y, 2)) / (2 * patch_sigma * patch_sigma));
                     contribution = weight * grad_norm;
@@ -405,10 +405,6 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
         }
     }
 }
-
-#ifndef DESC_HIST_SHARED_SIZE
-#define DESC_HIST_SHARED_SIZE (sift::N_HIST * sift::N_HIST * sift::N_ORI)
-#endif
 
 
 // update_histograms_device: Receives the relative theta_mn
@@ -430,17 +426,17 @@ __device__ void update_histograms_device_atomic(float* histograms, float x_rotat
                                       * (1.0f - sift::N_HIST * 0.5f / lambda_desc * d_y);
 
             for (int k = 1; k <= sift::N_ORI; k++) {
-                float theta_k = 2.0f * M_PIf * (k - 1.0f) / sift::N_ORI;
+                float theta_k = 2.0f * sift::M_PIf * (k - 1.0f) / sift::N_ORI;
                  // Calculate difference using the relative theta_mn
-                 float theta_diff = fmodf(theta_k - theta_mn + 2.0f * M_PIf, 2.0f * M_PIf);
+                 float theta_diff = fmodf(theta_k - theta_mn + 2.0f * sift::M_PIf, 2.0f * sift::M_PIf);
                 //  float d_theta = fabsf(theta_diff);
 
-                //  if (d_theta > M_PIf) d_theta = 2.0f * M_PIf - d_theta;
-                //  if (d_theta >= 2 * M_PIf / sift::N_ORI) continue;
-                if (fabsf(theta_diff) >= 2.0f * M_PIf / sift::N_ORI)
+                //  if (d_theta > sift::M_PIf) d_theta = 2.0f * sift::M_PIf - d_theta;
+                //  if (d_theta >= 2 * sift::M_PIf / sift::N_ORI) continue;
+                if (fabsf(theta_diff) >= 2.0f * sift::M_PIf / sift::N_ORI)
                     continue;
 
-                float bin_weight = 1.0f - sift::N_ORI * 0.5f / M_PIf * fabsf(theta_diff);
+                float bin_weight = 1.0f - sift::N_ORI * 0.5f / sift::M_PIf * fabsf(theta_diff);
                 int hist_index = ((i - 1) * sift::N_HIST + (j - 1)) * sift::N_ORI + (k - 1);
                 float total_contrib = hist_weight_spatial * bin_weight * contrib;
 
@@ -476,10 +472,10 @@ __global__ void generate_descriptors_one_block_per_kp(
     int img_height = deviceImgHeights[img_idx];
     float pix_dist = sift::MIN_PIX_DIST * pow(2.0f, kp.octave);
 
-    __shared__ float histograms[DESC_HIST_SHARED_SIZE];
+    __shared__ float histograms[sift::DESC_HIST_SHARED_SIZE];
 
     if (threadIdx.x == 0) {
-        for(int i = 0; i < DESC_HIST_SHARED_SIZE; ++i) {
+        for(int i = 0; i < sift::DESC_HIST_SHARED_SIZE; ++i) {
            histograms[i] = 0.0f;
        }
     }
@@ -528,7 +524,7 @@ __global__ void generate_descriptors_one_block_per_kp(
         float contribution = weight * grad_norm;
 
         // Calculate the relative gradient orientation here, like in the original kernel
-        float theta_mn = fmodf(atan2f(gy, gx) - theta + 4.0f * M_PIf, 2.0f * M_PIf);
+        float theta_mn = fmodf(atan2f(gy, gx) - theta + 4.0f * sift::M_PIf, 2.0f * sift::M_PIf);
 
 
         // Call the update function, passing the relative theta_mn
