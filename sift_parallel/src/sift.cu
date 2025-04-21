@@ -554,6 +554,7 @@ Image draw_matches(const Image& a, const Image& b, std::vector<Keypoint>& kps_a,
 /*****************************************************************************/
 /******************* SECTION 2: NAIVE CUDA HOST CODE *************************/
 
+// Identify the location of keypoints within the DoG processed images
 std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog_pyramid,
                                                     float contrast_thresh,
                                                     float edge_thresh)

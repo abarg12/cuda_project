@@ -1,5 +1,19 @@
 #include "sift.hpp"
 
+
+/* Summary:
+ *     Performs initial keypoint selection by identifying scale-space extrema
+ * Parameters:
+ *   - image: 1D image data for 3 scales: current, below, and above.
+ *   - keypoints: array of keypoint locations that will be populated with
+ *                a '1' if there is a keypoint at that index in the 1D image
+ *   - image_size: total number of pixels in a single image scale. The 'image'
+ *                 parameter will contain 3*image_size number of pixels.
+ *   - image_width: the width of a single image scale
+ * Return:
+ *     (void) popualtes the 'keypoints' with '1's for keypoint locations.
+ *            The 'keypoints' vector is initialized as all '0's
+ */
 __global__ void identify_keypoints(float *image,
                                    unsigned int *keypoints,
                                    int image_size,
@@ -50,6 +64,14 @@ __global__ void identify_keypoints(float *image,
 }
 
 
+/* Summary:
+ *     Helper function for the 'generate_orientations' kernel that applies
+ *     a smoothing operation to the input histogram.
+ * Parameters:
+ *   - hist: the orientation histogram
+ * Return:
+ *     (void) modifies the values in the 'hist' array
+ */
 __device__ void smooth_histogram_device(float* hist) {
     float tmp[sift::N_BINS];
     for (int i = 0; i < 6; i++) {
@@ -65,6 +87,17 @@ __device__ void smooth_histogram_device(float* hist) {
 }
 
 
+/* Summary:
+ *     Kernel that generates dominant orientations for a list of keypoints
+ * Parameters:
+ *   - devicePyramid: array of gradient data for the all images in scale space.
+ *                    Concatenated [gx][gy] data for each image in a 1D array,
+ *                    i.e. [img1_gx][img1_gy][img2_gx][img2_gy]... where img_gx
+ *                    is a 1D array of all x-direction gradient data
+ *   - deviceImgOffsets: 
+ * Return:
+ *     (void) modifies the values in the 'hist' array
+ */
 __global__ void generate_orientations_naive(float *devicePyramid,
                                             sift::Keypoint *deviceKeypoints,
                                             float *deviceOrientations,
