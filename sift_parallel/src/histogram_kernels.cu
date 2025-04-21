@@ -94,20 +94,38 @@ __device__ void smooth_histogram_device(float* hist) {
  *                    Concatenated [gx][gy] data for each image in a 1D array,
  *                    i.e. [img1_gx][img1_gy][img2_gx][img2_gy]... where img_gx
  *                    is a 1D array of all x-direction gradient data
- *   - deviceImgOffsets: 
+ *   - deviceKeypoints: array of all Keypoint structs
+ *   - deviceOrientations: output array which will holds the output orientations
+ *                         produced for each keypoint. The indices of this array
+ *                         match the keypoint indices in 'deviceKeypoints'
+ *   - deviceImgOffsets: array holding the start index locations for all images
+ *                       in the scale space 'devicePyramid'. This was necessary
+ *                       bookkeeping for providing the devicePyramid as a combined
+ *                       1D array of images at all octaves and scales.
+ *                       i.e. {img1_offset, img2_offset, img3_offset, ...}
+ *   - deviceImgWidths: array holding the image widths for all images in the
+ *                      scale space array 'devicePyramid' 
+ *                      i.e. {img1_width, img2_width, img3_width, ...}
+ *   - deviceImgHeights: array holding the image heights for all images in the
+ *                       scale space array 'devicePyramid'
+ *                       i.e. {img1_height, img2_height, img3_height, ...}
+ *   - num_kps: number of keypoints to be processed
+ *   - num_scales_per_octave: number of scales for each octave in 'devicePyramid'
+ *   - lambda_ori: controls size of orientation neighborhood for a keypoint
+ *   - lambda_desc: thresholds the keypoints for proximity to border
  * Return:
- *     (void) modifies the values in the 'hist' array
+ *     (void) modifies the deviceOrientations by reference
  */
-__global__ void generate_orientations_naive(float *devicePyramid,
-                                            sift::Keypoint *deviceKeypoints,
-                                            float *deviceOrientations,
-                                            int *deviceImgOffsets,
-                                            int *deviceImgWidths,
-                                            int *deviceImgHeights,
-                                            int num_kps,
-                                            int num_scales_per_octave,
-                                            float lambda_ori,
-                                            float lambda_desc)
+__global__ void generate_orientations(float *devicePyramid,
+                                      sift::Keypoint *deviceKeypoints,
+                                      float *deviceOrientations,
+                                      int *deviceImgOffsets,
+                                      int *deviceImgWidths,
+                                      int *deviceImgHeights,
+                                      int num_kps,
+                                      int num_scales_per_octave,
+                                      float lambda_ori,
+                                      float lambda_desc)
 {
     // Get the current keypoint indexed by thread location in the grid
     int tid = threadIdx.x + blockDim.x * blockIdx.x;
@@ -189,7 +207,19 @@ __global__ void generate_orientations_naive(float *devicePyramid,
 }
 
 
-
+/* Summary:
+ *     Helper function for the 'generate_descriptors' kernel which updates the
+ *     descriptor histogram at a given location x,y
+ * Parameters:
+ *   - hist: the descriptor histogram to modify
+ *   - x: normalized pixel x-coordinate which will contribute to the histogram
+ *   - y: normalized pixel y-coordinate which will contribute to the histogram
+ *   - contrib: gradient value contribution to the histogram
+ *   - theta_mn: orientaiton for location m,n within pixel neighborhood
+ *   - lambda_desc: bounding variable for pixel distance from neighborhood edge
+ * Return:
+ *     (void) modifies the values in the 'hist' array
+ */
 __device__ void update_histograms_device(float* hist, float x, float y,
                                         float contrib, float theta_mn, float lambda_desc)
 {

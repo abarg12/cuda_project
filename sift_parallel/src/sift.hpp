@@ -195,7 +195,7 @@ void compute_keypoint_descriptor(
  *   - grad_pyramid: scale space holding the pre-computed image gradients
  *   - lambda_desc: used in weighting the orientations of the descriptor
  * Return:
- *     (void) places the descriptor inside the kps objects by reference
+ *     (void) places the descriptors inside the kps objects by reference
  */
 void compute_keypoint_descriptors_parallel_naive(
         std::vector<Keypoint>& kps,
@@ -204,14 +204,44 @@ void compute_keypoint_descriptors_parallel_naive(
         float lambda_desc=LAMBDA_DESC);
 
 
-// calculates the orientations and descriptors in a single kernel
+/* Summary:
+ *     Computes the orientations and 128-element SIFT descriptors for
+ *     all keypoints. Calls a combined orientation and descriptor kernel.
+ * Parameters:
+ *   - kps: keypoints for which the descriptors will be calculated
+ *   - theta: the dominant orientation for each keypoint ordered by kps index
+ *   - grad_pyramid: scale space holding the pre-computed image gradients
+ *   - lambda_desc: used in weighting the orientations of the descriptor
+ * Return:
+ *     (void) places the descriptors inside the kps objects by reference
+ * Optimization notes:
+ *     We expected combining the kernels to have an immediate benefit,
+ *     but actually the opposite happened since there was too much
+ *     pressure on the registers within the complex kernel.
+ */
 std::vector<Keypoint> find_ori_desc_parallel_combined(std::vector<Keypoint>& kps,
                                                         const ScaleSpacePyramid& grad_pyramid,
                                                         float lambda_ori=LAMBDA_ORI,
                                                         float lambda_desc=LAMBDA_DESC);
 
 
-// calculates the orientations and descriptors in two optimized kernels
+/* Summary:
+ *     Computes the orientations and 128-element SIFT descriptors for
+ *     all keypoints. Calls the orientation kernel followed by an
+ *     optimized descriptor kernel in sequence.
+ * Parameters:
+ *   - kps: keypoints for which the descriptors will be calculated
+ *   - theta: the dominant orientation for each keypoint ordered by kps index
+ *   - grad_pyramid: scale space holding the pre-computed image gradients
+ *   - lambda_desc: used in weighting the orientations of the descriptor
+ * Return:
+ *     (void) places the descriptors inside the kps objects by reference
+ * Optimization notes:
+ *     By calling both the orientation and descriptor kernels in the same
+ *     host function, we were able to easily share global input arrays for
+ *     both kernels. It also gave us the flexibility to focus on the
+ *     descriptor generation kernel which was the runtime bottleneck.
+ */
 std::vector<Keypoint> find_ori_desc_parallel_opt(std::vector<Keypoint>& kps,
                                                         const ScaleSpacePyramid& grad_pyramid,
                                                         float lambda_ori=LAMBDA_ORI,
