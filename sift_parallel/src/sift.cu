@@ -743,7 +743,7 @@ std::vector<std::vector<float>> find_keypoint_orientations_parallel_naive(std::v
 
     dim3 blockDim(256);
     dim3 gridDim((kps.size() + blockDim.x - 1) / blockDim.x);
-    generate_orientations_naive<<<gridDim, blockDim>>>(devicePyramid,
+    generate_orientations<<<gridDim, blockDim>>>(devicePyramid,
                                                        deviceKeypoints,
                                                        deviceOrientations,
                                                        deviceImgOffsets,
@@ -876,7 +876,7 @@ void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kps,
 
     dim3 blockDim(256);
     dim3 gridDim((kps.size() + blockDim.x - 1) / blockDim.x);
-    generate_descriptors_naive<<<gridDim, blockDim>>>(devicePyramid,
+    generate_descriptors<<<gridDim, blockDim>>>(devicePyramid,
                                                        deviceKeypoints,
                                                        deviceKeypointDescriptors,
                                                        deviceThetas,
@@ -994,7 +994,7 @@ std::vector<Keypoint> find_ori_desc_parallel_opt(std::vector<Keypoint>& kps,
 
     dim3 blockDim(256);
     dim3 gridDim((kps.size() + blockDim.x - 1) / blockDim.x);
-    generate_orientations_naive<<<gridDim, blockDim>>>(devicePyramid,
+    generate_orientations<<<gridDim, blockDim>>>(devicePyramid,
                                                        deviceKeypoints,
                                                        deviceOrientations,
                                                        deviceImgOffsets,
@@ -1059,18 +1059,34 @@ std::vector<Keypoint> find_ori_desc_parallel_opt(std::vector<Keypoint>& kps,
         }
     }
 
-    dim3 blockDimDesc(256);
-    dim3 gridDimDesc((out_size + blockDimDesc.x - 1) / blockDimDesc.x);
-    generate_descriptors_naive<<<blockDimDesc, gridDimDesc>>>(devicePyramid,
-                                                       deviceKeypointsNew,
-                                                       deviceKeypointDescriptors,
-                                                       deviceOrientationsNew,
-                                                       deviceImgOffsets,
-                                                       deviceImgWidths,
-                                                       deviceImgHeights,
-                                                       out_size,
-                                                       grad_pyramid.imgs_per_octave,
-                                                       lambda_desc);
+    // dim3 blockDimDesc(256);
+    // dim3 gridDimDesc((out_size + blockDimDesc.x - 1) / blockDimDesc.x);
+    // generate_descriptors<<<blockDimDesc, gridDimDesc>>>(devicePyramid,
+    //                                                    deviceKeypointsNew,
+    //                                                    deviceKeypointDescriptors,
+    //                                                    deviceOrientationsNew,
+    //                                                    deviceImgOffsets,
+    //                                                    deviceImgWidths,
+    //                                                    deviceImgHeights,
+    //                                                    out_size,
+    //                                                    grad_pyramid.imgs_per_octave,
+    //                                                    lambda_desc);
+
+    dim3 blockDimDesc(128); // Example block size, choose based on testing and workload
+    dim3 gridDimDesc(out_size); // One block per filtered keypoint/orientation
+
+    // Shared memory size is NOT specified for static shared memory
+    generate_descriptors_one_block_per_kp<<<gridDimDesc, blockDimDesc>>>(
+        devicePyramid,
+        deviceKeypointsNew,         // Filtered keypoints
+        deviceKeypointDescriptors,  // Output descriptors
+        deviceOrientationsNew,      // Filtered orientations
+        deviceImgOffsets,
+        deviceImgWidths,
+        deviceImgHeights,
+        out_size,                   // Number of filtered keypoints/orientations
+        grad_pyramid.imgs_per_octave,
+        lambda_desc);
 
 
     // Copy the descriptors back from the device
