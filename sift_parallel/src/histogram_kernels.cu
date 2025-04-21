@@ -56,7 +56,7 @@ __device__ void smooth_histogram_device(float* hist) {
         for (int j = 0; j < sift::N_BINS; j++) {
             int prev = (j - 1 + sift::N_BINS) % sift::N_BINS;
             int next = (j + 1) % sift::N_BINS;
-            tmp[j] = (hist[prev] + hist[j] + hist[next]) / 3.0;
+            tmp[j] = (hist[prev] + hist[j] + hist[next]) / 3.0f;
         }
         for (int j = 0; j < sift::N_BINS; j++) {
             hist[j] = tmp[j];
@@ -89,12 +89,12 @@ __global__ void generate_orientations_naive(float *devicePyramid,
     int img_offset = deviceImgOffsets[img_idx];
     int img_width = deviceImgWidths[img_idx];
     int img_height = deviceImgHeights[img_idx];
-    float pix_dist = sift::MIN_PIX_DIST * std::pow(2, kp.octave);
+    float pix_dist = sift::MIN_PIX_DIST * powf(2.0f, kp.octave);
     float min_dist_from_border = fminf(fminf(kp.x, kp.y), 
                                        fminf(pix_dist * img_width - kp.x,
                                              pix_dist * img_height - kp.y));
     // discard keypoint if too close to image borders
-    if (min_dist_from_border <= sqrtf(2.0) * lambda_desc * kp.sigma) {
+    if (min_dist_from_border <= sqrtf(2.0f) * lambda_desc * kp.sigma) {
         return;
     }
 
@@ -102,7 +102,7 @@ __global__ void generate_orientations_naive(float *devicePyramid,
     int bin;
     float gx, gy, grad_norm, weight, theta;
     float patch_sigma = lambda_ori * kp.sigma;
-    float patch_radius = 3.0 * patch_sigma;
+    float patch_radius = 3.0f * patch_sigma;
 
     int x_start = roundf((kp.x - patch_radius) / pix_dist);
     int x_end   = roundf((kp.x + patch_radius) / pix_dist);
@@ -120,12 +120,12 @@ __global__ void generate_orientations_naive(float *devicePyramid,
 
             grad_norm = sqrtf(gx * gx + gy * gy);
 
-            weight = expf(-(powf(x * pix_dist - kp.x, 2) +
-                              powf(y * pix_dist - kp.y, 2)) /
-                            (2 * patch_sigma * patch_sigma));
+            weight = expf(-(powf(x * pix_dist - kp.x, 2.0f) +
+                              powf(y * pix_dist - kp.y, 2.0f)) /
+                            (2.0f * patch_sigma * patch_sigma));
 
-            theta = fmodf(atan2f(gy, gx) + 2 * M_PI, 2 * M_PI);
-            bin = ((int)roundf(sift::N_BINS / (2 * M_PI) * theta)) % sift::N_BINS;
+            theta = fmodf(atan2f(gy, gx) + 2.0f * M_PIf, 2.0f * M_PIf);
+            bin = ((int)roundf(sift::N_BINS / (2.0f * M_PIf) * theta)) % sift::N_BINS;
             hist[bin] += weight * grad_norm;
         }
     }
@@ -133,8 +133,8 @@ __global__ void generate_orientations_naive(float *devicePyramid,
     smooth_histogram_device(hist);
 
     // extract reference orientations
-    float ori_thresh = 0.8;
-    float ori_max = 0.0;
+    float ori_thresh = 0.8f;
+    float ori_max = 0.0f;
     for (int i = 0; i < sift::N_BINS; i++) {
         if (hist[i] > ori_max) {
             ori_max = hist[i];
@@ -149,7 +149,7 @@ __global__ void generate_orientations_naive(float *devicePyramid,
                 continue;
             }
 
-            float theta = 2*M_PI*(i+1)/sift::N_BINS + M_PI/sift::N_BINS*(prev-next)/(prev-2*hist[i]+next);
+            float theta = 2.0f*M_PIf*(i+1.0f)/sift::N_BINS + M_PIf/sift::N_BINS*(prev-next)/(prev-2.0f*hist[i]+next);
             deviceOrientations[tid * sift::N_BINS + i] = theta;
         }
     }
@@ -162,23 +162,23 @@ __device__ void update_histograms_device(float* hist, float x, float y,
 {
     float x_i, y_j;
     for (int i = 1; i <= sift::N_HIST; i++) {
-        x_i = (i - (1 + (float)sift::N_HIST) / 2) * 2 * lambda_desc / sift::N_HIST;
-        if (fabsf(x_i - x) > 2 * lambda_desc / sift::N_HIST)
+        x_i = (i - (1 + (float)sift::N_HIST) / 2.0f) * 2.0f * lambda_desc / sift::N_HIST;
+        if (fabsf(x_i - x) > 2.0f * lambda_desc / sift::N_HIST)
             continue;
         for (int j = 1; j <= sift::N_HIST; j++) {
-            y_j = (j - (1 + (float)sift::N_HIST) / 2) * 2 * lambda_desc / sift::N_HIST;
-            if (fabsf(y_j - y) > 2 * lambda_desc / sift::N_HIST)
+            y_j = (j - (1.0f + (float)sift::N_HIST) / 2.0f) * 2.0f * lambda_desc / sift::N_HIST;
+            if (fabsf(y_j - y) > 2.0f * lambda_desc / sift::N_HIST)
                 continue;
 
-            float hist_weight = (1 - sift::N_HIST * 0.5 / lambda_desc * fabsf(x_i - x))
-                              * (1 - sift::N_HIST * 0.5 / lambda_desc * fabsf(y_j - y));
+            float hist_weight = (1.0f - sift::N_HIST * 0.5f / lambda_desc * fabsf(x_i - x))
+                              * (1.0f - sift::N_HIST * 0.5f / lambda_desc * fabsf(y_j - y));
 
             for (int k = 1; k <= sift::N_ORI; k++) {
-                float theta_k = 2 * M_PI * (k - 1) / sift::N_ORI;
-                float theta_diff = fmodf(theta_k - theta_mn + 2 * M_PI, 2 * M_PI);
-                if (fabsf(theta_diff) >= 2 * M_PI / sift::N_ORI)
+                float theta_k = 2.0f * M_PIf * (k - 1.0f) / sift::N_ORI;
+                float theta_diff = fmodf(theta_k - theta_mn + 2 * M_PIf, 2 * M_PIf);
+                if (fabsf(theta_diff) >= 2 * M_PIf / sift::N_ORI)
                     continue;
-                float bin_weight = 1 - sift::N_ORI * 0.5 / M_PI * fabsf(theta_diff);
+                float bin_weight = 1.0f - sift::N_ORI * 0.5f / M_PIf * fabsf(theta_diff);
                 int hist_index = ((i - 1) * sift::N_HIST + (j - 1)) * sift::N_ORI + (k - 1);
                 hist[hist_index] += hist_weight * bin_weight * contrib;
             }
@@ -189,20 +189,20 @@ __device__ void update_histograms_device(float* hist, float x, float y,
 __device__ void hists_to_vec_device(float* histograms, uint8_t* feature_vec)
 {
     int size = sift::N_HIST * sift::N_HIST * sift::N_ORI;
-    float norm = 0.0;
+    float norm = 0.0f;
     for (int i = 0; i < size; i++) {
         norm += histograms[i] * histograms[i];
     }
     norm = sqrtf(norm);
-    float norm2 = 0.0;
+    float norm2 = 0.0f;
     for (int i = 0; i < size; i++) {
-        histograms[i] = fminf(histograms[i], 0.2 * norm);
+        histograms[i] = fminf(histograms[i], 0.2f * norm);
         norm2 += histograms[i] * histograms[i];
     }
     norm2 = sqrtf(norm2);
     for (int i = 0; i < size; i++) {
-        float val = floorf(512 * histograms[i] / norm2);
-        feature_vec[i] = static_cast<uint8_t>(fminf(val, 255.0));
+        float val = floorf(512.0f * histograms[i] / norm2);
+        feature_vec[i] = static_cast<uint8_t>(min((int) val, 255));
     }
 }
 
@@ -228,12 +228,12 @@ __global__ void generate_descriptors_naive(float* devicePyramid,
     int img_offset = deviceImgOffsets[img_idx];
     int img_width = deviceImgWidths[img_idx];
     int img_height = deviceImgHeights[img_idx];
-    float pix_dist = sift::MIN_PIX_DIST * powf(2, kp.octave);
+    float pix_dist = sift::MIN_PIX_DIST * powf(2.0f, kp.octave);
     float histograms[sift::N_HIST * sift::N_HIST * sift::N_ORI] = {0};
 
     float gx, gy, theta_mn, grad_norm, weight, contribution;
 
-    float half_size = sqrtf(2) * lambda_desc * kp.sigma * (sift::N_HIST + 1.0) / sift::N_HIST;
+    float half_size = sqrtf(2.0f) * lambda_desc * kp.sigma * (sift::N_HIST + 1.0f) / sift::N_HIST;
     int x_start = roundf((kp.x - half_size) / pix_dist);
     int x_end = roundf((kp.x + half_size) / pix_dist);
     int y_start = roundf((kp.y - half_size) / pix_dist);
@@ -256,15 +256,15 @@ __global__ void generate_descriptors_naive(float* devicePyramid,
 
 
             // verify (x, y) is inside the description patch
-            if (fmaxf(fabsf(x), fabsf(y)) > lambda_desc * (sift::N_HIST + 1.0) / sift::N_HIST)
+            if (fmaxf(fabsf(x), fabsf(y)) > lambda_desc * (sift::N_HIST + 1.0f) / sift::N_HIST)
                 continue;
 
             gx = devicePyramid[img_offset + idx];
             gy = devicePyramid[img_offset + idx + img_width * img_height];
             
-            theta_mn = fmodf(atan2f(gy, gx) - theta + 4 * M_PI, 2 * M_PI);
+            theta_mn = fmodf(atan2f(gy, gx) - theta + 4.0f * M_PIf, 2.0f * M_PIf);
             grad_norm = sqrtf(gx * gx + gy * gy);
-            weight = expf(-(powf(m * pix_dist - kp.x, 2) + powf(n * pix_dist - kp.y, 2)) / (2 * patch_sigma * patch_sigma));
+            weight = expf(-(powf(m * pix_dist - kp.x, 2.0f) + powf(n * pix_dist - kp.y, 2.0f)) / (2.0f * patch_sigma * patch_sigma));
             contribution = weight * grad_norm;
 
             update_histograms_device(histograms, x, y, contribution, theta_mn, lambda_desc);
@@ -334,8 +334,8 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
                               powf(y * pix_dist - kp.y, 2)) /
                             (2 * patch_sigma * patch_sigma));
 
-            theta = fmodf(atan2f(gy, gx) + 2 * M_PI, 2 * M_PI);
-            bin = ((int)roundf(sift::N_BINS / (2 * M_PI) * theta)) % sift::N_BINS;
+            theta = fmodf(atan2f(gy, gx) + 2 * M_PIf, 2 * M_PIf);
+            bin = ((int)roundf(sift::N_BINS / (2 * M_PIf) * theta)) % sift::N_BINS;
             hist[bin] += weight * grad_norm;
         }
     }
@@ -360,7 +360,7 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
                 continue;
             }
 
-            float theta = 2*M_PI*(i+1)/sift::N_BINS + M_PI/sift::N_BINS*(prev-next)/(prev-2*hist[i]+next);
+            float theta = 2*M_PIf*(i+1)/sift::N_BINS + M_PIf/sift::N_BINS*(prev-next)/(prev-2*hist[i]+next);
             deviceOrientations[tid * sift::N_BINS + i] = theta;
 
             half_size = sqrtf(2) * lambda_desc * kp.sigma * (sift::N_HIST + 1.0) / sift::N_HIST;
@@ -392,7 +392,7 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
                     gx = devicePyramid[img_offset + idx];
                     gy = devicePyramid[img_offset + idx + img_width * img_height];
                     
-                    theta_mn = fmodf(atan2f(gy, gx) - theta + 4 * M_PI, 2 * M_PI);
+                    theta_mn = fmodf(atan2f(gy, gx) - theta + 4 * M_PIf, 2 * M_PIf);
                     grad_norm = sqrtf(gx * gx + gy * gy);
                     weight = expf(-(powf(m * pix_dist - kp.x, 2) + powf(n * pix_dist - kp.y, 2)) / (2 * patch_sigma * patch_sigma));
                     contribution = weight * grad_norm;

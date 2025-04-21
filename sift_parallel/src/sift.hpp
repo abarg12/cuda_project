@@ -8,6 +8,10 @@
 
 #include "image.hpp"
 
+#ifndef M_PIf
+#define M_PIf 3.14159265358979323846f // Using a precise literal for float
+#endif
+
 namespace sift {
 
 struct ScaleSpacePyramid {
