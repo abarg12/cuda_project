@@ -90,38 +90,38 @@ __device__ void smooth_histogram_device(float* hist) {
 /* Summary:
  *     Kernel that generates dominant orientations for a list of keypoints
  * Parameters:
- *   - devicePyramid: array of gradient data for the all images in scale space.
- *                    Concatenated [gx][gy] data for each image in a 1D array,
- *                    i.e. [img1_gx][img1_gy][img2_gx][img2_gy]... where img_gx
- *                    is a 1D array of all x-direction gradient data
- *   - deviceKeypoints: array of all Keypoint structs
- *   - deviceOrientations: output array which will holds the output orientations
- *                         produced for each keypoint. The indices of this array
- *                         match the keypoint indices in 'deviceKeypoints'
- *   - deviceImgOffsets: array holding the start index locations for all images
- *                       in the scale space 'devicePyramid'. This was necessary
- *                       bookkeeping for providing the devicePyramid as a combined
- *                       1D array of images at all octaves and scales.
- *                       i.e. {img1_offset, img2_offset, img3_offset, ...}
- *   - deviceImgWidths: array holding the image widths for all images in the
- *                      scale space array 'devicePyramid' 
- *                      i.e. {img1_width, img2_width, img3_width, ...}
- *   - deviceImgHeights: array holding the image heights for all images in the
- *                       scale space array 'devicePyramid'
- *                       i.e. {img1_height, img2_height, img3_height, ...}
+ *   - gradPyramid: array of gradient data for the all images in scale space.
+ *                  Concatenated [gx][gy] data for each image in a 1D array,
+ *                  i.e. [img1_gx][img1_gy][img2_gx][img2_gy]... where img_gx
+ *                  is a 1D array of all x-direction gradient data
+ *   - keypoints: array of all Keypoint structs
+ *   - orientations: output array which will holds the output orientations
+ *                   produced for each keypoint. The indices of this array
+ *                   match the keypoint indices in 'keypoints'
+ *   - imgOffsets: array holding the start index locations for all images
+ *                 in the scale space 'gradPyramid'. This was necessary
+ *                 bookkeeping for providing the gradPyramid as a combined
+ *                 1D array of images at all octaves and scales.
+ *                 i.e. {img1_offset, img2_offset, img3_offset, ...}
+ *   - imgWidths: array holding the image widths for all images in the
+ *                scale space array 'gradPyramid' 
+ *                i.e. {img1_width, img2_width, img3_width, ...}
+ *   - imgHeights: array holding the image heights for all images in the
+ *                 scale space array 'gradPyramid'
+ *                 i.e. {img1_height, img2_height, img3_height, ...}
  *   - num_kps: number of keypoints to be processed
- *   - num_scales_per_octave: number of scales for each octave in 'devicePyramid'
+ *   - num_scales_per_octave: number of scales for each octave in 'gradPyramid'
  *   - lambda_ori: controls size of orientation neighborhood for a keypoint
  *   - lambda_desc: thresholds the keypoints for proximity to border
  * Return:
- *     (void) modifies the deviceOrientations by reference
+ *     (void) modifies the orientations by reference
  */
-__global__ void generate_orientations(float *devicePyramid,
-                                      sift::Keypoint *deviceKeypoints,
-                                      float *deviceOrientations,
-                                      int *deviceImgOffsets,
-                                      int *deviceImgWidths,
-                                      int *deviceImgHeights,
+__global__ void generate_orientations(float *gradPyramid,
+                                      sift::Keypoint *keypoints,
+                                      float *orientations,
+                                      int *imgOffsets,
+                                      int *imgWidths,
+                                      int *imgHeights,
                                       int num_kps,
                                       int num_scales_per_octave,
                                       float lambda_ori,
@@ -134,12 +134,12 @@ __global__ void generate_orientations(float *devicePyramid,
         return;
     }
 
-    sift::Keypoint kp = deviceKeypoints[tid];
+    sift::Keypoint kp = keypoints[tid];
     // Get the image index that the keypoint belongs to
     int img_idx = kp.octave * num_scales_per_octave + kp.scale;
-    int img_offset = deviceImgOffsets[img_idx];
-    int img_width = deviceImgWidths[img_idx];
-    int img_height = deviceImgHeights[img_idx];
+    int img_offset = imgOffsets[img_idx];
+    int img_width = imgWidths[img_idx];
+    int img_height = imgHeights[img_idx];
     float pix_dist = sift::MIN_PIX_DIST * powf(2.0f, kp.octave);
     float min_dist_from_border = fminf(fminf(kp.x, kp.y), 
                                        fminf(pix_dist * img_width - kp.x,
@@ -166,8 +166,8 @@ __global__ void generate_orientations(float *devicePyramid,
             int clamped_y = max(0, min(y, img_height - 1));
             int idx = clamped_y * img_width + clamped_x;
 
-            gx = devicePyramid[img_offset + idx];
-            gy = devicePyramid[img_offset + idx + img_width * img_height];
+            gx = gradPyramid[img_offset + idx];
+            gy = gradPyramid[img_offset + idx + img_width * img_height];
 
             grad_norm = sqrtf(gx * gx + gy * gy);
 
@@ -201,7 +201,7 @@ __global__ void generate_orientations(float *devicePyramid,
             }
 
             float theta = 2.0f*sift::M_PIf*(i+1.0f)/sift::N_BINS + sift::M_PIf/sift::N_BINS*(prev-next)/(prev-2.0f*hist[i]+next);
-            deviceOrientations[tid * sift::N_BINS + i] = theta;
+            orientations[tid * sift::N_BINS + i] = theta;
         }
     }
 }
@@ -220,8 +220,12 @@ __global__ void generate_orientations(float *devicePyramid,
  * Return:
  *     (void) modifies the values in the 'hist' array
  */
-__device__ void update_histograms_device(float* hist, float x, float y,
-                                        float contrib, float theta_mn, float lambda_desc)
+__device__ void update_histograms_device(float* hist,
+                                         float x,
+                                         float y,
+                                         float contrib,
+                                         float theta_mn,
+                                         float lambda_desc)
 {
     float x_i, y_j;
     for (int i = 1; i <= sift::N_HIST; i++) {
@@ -269,28 +273,28 @@ __device__ void hists_to_vec_device(float* histograms, uint8_t* feature_vec)
     }
 }
 
-__global__ void generate_descriptors(float* devicePyramid,
-                                           sift::Keypoint* deviceKeypoints,
-                                           uint8_t* deviceKeypointDescriptors,
-                                           float* thetas,
-                                           int *deviceImgOffsets,
-                                           int *deviceImgWidths,
-                                           int *deviceImgHeights,
-                                           int num_kps,
-                                           int num_scales_per_octave,
-                                           float lambda_desc)
+__global__ void generate_descriptors(float* gradPyramid,
+                                     sift::Keypoint* keypoints,
+                                     uint8_t* keypointDescriptors,
+                                     float* thetas,
+                                     int *imgOffsets,
+                                     int *imgWidths,
+                                     int *imgHeights,
+                                     int num_kps,
+                                     int num_scales_per_octave,
+                                     float lambda_desc)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_kps)
         return;
 
-    sift::Keypoint kp = deviceKeypoints[tid];
+    sift::Keypoint kp = keypoints[tid];
     float theta = thetas[tid];
      // Get the image index that the keypoint belongs to
     int img_idx = kp.octave * num_scales_per_octave + kp.scale;
-    int img_offset = deviceImgOffsets[img_idx];
-    int img_width = deviceImgWidths[img_idx];
-    int img_height = deviceImgHeights[img_idx];
+    int img_offset = imgOffsets[img_idx];
+    int img_width = imgWidths[img_idx];
+    int img_height = imgHeights[img_idx];
     float pix_dist = sift::MIN_PIX_DIST * powf(2.0f, kp.octave);
     float histograms[sift::N_HIST * sift::N_HIST * sift::N_ORI] = {0};
 
@@ -322,8 +326,8 @@ __global__ void generate_descriptors(float* devicePyramid,
             if (fmaxf(fabsf(x), fabsf(y)) > lambda_desc * (sift::N_HIST + 1.0f) / sift::N_HIST)
                 continue;
 
-            gx = devicePyramid[img_offset + idx];
-            gy = devicePyramid[img_offset + idx + img_width * img_height];
+            gx = gradPyramid[img_offset + idx];
+            gy = gradPyramid[img_offset + idx + img_width * img_height];
             
             theta_mn = fmodf(atan2f(gy, gx) - theta + 4.0f * sift::M_PIf, 2.0f * sift::M_PIf);
             grad_norm = sqrtf(gx * gx + gy * gy);
@@ -334,20 +338,20 @@ __global__ void generate_descriptors(float* devicePyramid,
         }
     }
 
-    hists_to_vec_device(histograms, deviceKeypointDescriptors + tid * 128);
+    hists_to_vec_device(histograms, keypointDescriptors + tid * 128);
 }
 
-__global__ void generate_orientations_and_descriptors(float* devicePyramid,
-                                                    sift::Keypoint* deviceKeypoints,
-                                                    uint8_t* deviceKeypointDescriptors,
-                                                    float *deviceOrientations,
-                                                    int *deviceImgOffsets,
-                                                    int *deviceImgWidths,
-                                                    int *deviceImgHeights,
-                                                    int num_kps,
-                                                    int num_scales_per_octave,
-                                                    float lambda_ori,
-                                                    float lambda_desc)
+__global__ void generate_orientations_and_descriptors(float* gradPyramid,
+                                                      sift::Keypoint* keypoints,
+                                                      uint8_t* keypointDescriptors,
+                                                      float *orientations,
+                                                      int *imgOffsets,
+                                                      int *imgWidths,
+                                                      int *imgHeights,
+                                                      int num_kps,
+                                                      int num_scales_per_octave,
+                                                      float lambda_ori,
+                                                      float lambda_desc)
 {
     // Get the current keypoint indexed by thread location in the grid
     int tid = threadIdx.x + blockDim.x * blockIdx.x;
@@ -356,12 +360,12 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
         return;
     }
 
-    sift::Keypoint kp = deviceKeypoints[tid];
+    sift::Keypoint kp = keypoints[tid];
     // Get the image index that the keypoint belongs to
     int img_idx = kp.octave * num_scales_per_octave + kp.scale;
-    int img_offset = deviceImgOffsets[img_idx];
-    int img_width = deviceImgWidths[img_idx];
-    int img_height = deviceImgHeights[img_idx];
+    int img_offset = imgOffsets[img_idx];
+    int img_width = imgWidths[img_idx];
+    int img_height = imgHeights[img_idx];
     float pix_dist = sift::MIN_PIX_DIST * std::pow(2, kp.octave);
     float min_dist_from_border = fminf(fminf(kp.x, kp.y), 
                                        fminf(pix_dist * img_width - kp.x,
@@ -388,8 +392,8 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
             int clamped_y = max(0, min(y, img_height - 1));
             int idx = clamped_y * img_width + clamped_x;
 
-            gx = devicePyramid[img_offset + idx];
-            gy = devicePyramid[img_offset + idx + img_width * img_height];
+            gx = gradPyramid[img_offset + idx];
+            gy = gradPyramid[img_offset + idx + img_width * img_height];
 
             grad_norm = sqrtf(gx * gx + gy * gy);
 
@@ -424,7 +428,7 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
             }
 
             float theta = 2*sift::M_PIf*(i+1)/sift::N_BINS + sift::M_PIf/sift::N_BINS*(prev-next)/(prev-2*hist[i]+next);
-            deviceOrientations[tid * sift::N_BINS + i] = theta;
+            orientations[tid * sift::N_BINS + i] = theta;
 
             half_size = sqrtf(2) * lambda_desc * kp.sigma * (sift::N_HIST + 1.0) / sift::N_HIST;
             x_start = roundf((kp.x - half_size) / pix_dist);
@@ -452,8 +456,8 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
                     if (fmaxf(fabsf(x), fabsf(y)) > lambda_desc * (sift::N_HIST + 1.0) / sift::N_HIST)
                         continue;
 
-                    gx = devicePyramid[img_offset + idx];
-                    gy = devicePyramid[img_offset + idx + img_width * img_height];
+                    gx = gradPyramid[img_offset + idx];
+                    gy = gradPyramid[img_offset + idx + img_width * img_height];
                     
                     theta_mn = fmodf(atan2f(gy, gx) - theta + 4 * sift::M_PIf, 2 * sift::M_PIf);
                     grad_norm = sqrtf(gx * gx + gy * gy);
@@ -464,15 +468,19 @@ __global__ void generate_orientations_and_descriptors(float* devicePyramid,
                 }
             }
 
-            hists_to_vec_device(histograms, deviceKeypointDescriptors + 128 * (tid * sift::N_BINS + i));
+            hists_to_vec_device(histograms, keypointDescriptors + 128 * (tid * sift::N_BINS + i));
         }
     }
 }
 
 
 // update_histograms_device: Receives the relative theta_mn
-__device__ void update_histograms_device_atomic(float* histograms, float x_rotated, float y_rotated,
-                                         float contrib, float theta_mn, float lambda_desc) // theta_mn is the RELATIVE orientation
+__device__ void update_histograms_device_atomic(float* histograms,
+                                                float x_rotated,
+                                                float y_rotated,
+                                                float contrib,
+                                                float theta_mn,
+                                                float lambda_desc)
 {
     float x_i, y_j;
     for (int i = 1; i <= sift::N_HIST; i++) {
@@ -510,29 +518,28 @@ __device__ void update_histograms_device_atomic(float* histograms, float x_rotat
 }
 
 
-__global__ void generate_descriptors_one_block_per_kp(
-    float* devicePyramid,
-    sift::Keypoint* deviceKeypoints, // List of keypoints to process
-    uint8_t* deviceKeypointDescriptors, // Output buffer for descriptors
-    float* thetas, // List of orientations corresponding to keypoints
-    int *deviceImgOffsets,
-    int *deviceImgWidths,
-    int *deviceImgHeights,
-    int num_kps,
-    int num_scales_per_octave,
-    float lambda_desc)
+__global__ void generate_descriptors_one_block_per_kp(float* gradPyramid,
+                                                      sift::Keypoint* keypoints,
+                                                      uint8_t* keypointDescriptors,
+                                                      float* thetas,
+                                                      int *imgOffsets,
+                                                      int *imgWidths,
+                                                      int *imgHeights,
+                                                      int num_kps,
+                                                      int num_scales_per_octave,
+                                                      float lambda_desc)
 {
     int bIdx = blockIdx.x;
 
     if (bIdx >= num_kps)
         return;
 
-    sift::Keypoint kp = deviceKeypoints[bIdx];
+    sift::Keypoint kp = keypoints[bIdx];
     float theta = thetas[bIdx];
     int img_idx = kp.octave * num_scales_per_octave + kp.scale;
-    int img_offset = deviceImgOffsets[img_idx];
-    int img_width = deviceImgWidths[img_idx];
-    int img_height = deviceImgHeights[img_idx];
+    int img_offset = imgOffsets[img_idx];
+    int img_width = imgWidths[img_idx];
+    int img_height = imgHeights[img_idx];
     float pix_dist = sift::MIN_PIX_DIST * pow(2.0f, kp.octave);
 
     __shared__ float histograms[sift::DESC_HIST_SHARED_SIZE];
@@ -577,8 +584,8 @@ __global__ void generate_descriptors_one_block_per_kp(
             continue;
         }
 
-        float gx = devicePyramid[img_offset + idx];
-        float gy = devicePyramid[img_offset + idx + img_width * img_height];
+        float gx = gradPyramid[img_offset + idx];
+        float gy = gradPyramid[img_offset + idx + img_width * img_height];
 
         float grad_norm = sqrtf(gx * gx + gy * gy);
 
@@ -599,6 +606,6 @@ __global__ void generate_descriptors_one_block_per_kp(
 
     if (threadIdx.x == 0) {
         // Call the finalization function
-        hists_to_vec_device((float*) histograms, deviceKeypointDescriptors + bIdx * 128);
+        hists_to_vec_device((float*) histograms, keypointDescriptors + bIdx * 128);
     }
 }
