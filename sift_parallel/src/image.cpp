@@ -255,9 +255,9 @@ Image gaussian_blur(const Image& img, float sigma)
         size++;
     int center = size / 2;
     Image kernel(size, 1, 1);
-    float sum = 0;
+    float sum = 0.0f;
     for (int k = -size/2; k <= size/2; k++) {
-        float val = expf(-(float)(k*k) / (2.0f*sigma*sigma));
+        float val = expf(-(k*k) / (2.0f*sigma*sigma));
         kernel.set_pixel(center+k, 0, 0, val);
         sum += val;
     }
@@ -270,7 +270,7 @@ Image gaussian_blur(const Image& img, float sigma)
     // convolve vertical
     for (int x = 0; x < img.width; x++) {
         for (int y = 0; y < img.height; y++) {
-            float sum = 0;
+            float sum = 0.0f;
             for (int k = 0; k < size; k++) {
                 int dy = -center + k;
                 sum += img.get_pixel(x, y+dy, 0) * kernel.data[k];

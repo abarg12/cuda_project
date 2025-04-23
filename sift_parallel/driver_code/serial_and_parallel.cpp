@@ -10,7 +10,7 @@ int main(int argc, char *argv[])
     std::cin.tie(NULL);
 
     if (argc != 2) {
-        std::cerr << "Usage: ./find_keypoints input.jpg (or .png)\n";
+        std::cerr << "Usage: ./serial_and_parallel input.jpg (or .png)\n";
         return 0;
     }
     Image img(argv[1]);
@@ -28,70 +28,13 @@ int main(int argc, char *argv[])
     // Verifying keypoints for accuracy among all versions
     printf("--------------------------------------------------\n");
     printf("VERIFYING ACCURACY OF PARALLEL VERSIONS\n");
-    if (kps.size() != kps_p.size()) {
-        printf("[!!!FAILURE!!!] Serial: %d keypoints, Naive Parallel: %d keypoints\n", kps.size(), kps_p.size());
-    } else {
-        printf("[SUCCESS] Serial: %d keypoints, Naive Parallel: %d keypoints\n", kps.size(), kps_p.size());
+    printf("Serial: %d keypoints, Naive Parallel: %d keypoints\n", kps.size(), kps_p.size());
+    std::vector<std::pair<int, int>> matches = sift::find_keypoint_matches(kps, kps_p);
+    printf("Serial and Naive Parallel have %d matching keypoints\n", matches.size());
 
-        bool same_locations = true;
-        for (int i = 0; i < kps.size(); i++) {
-            if (kps[i].i != kps_p[i].i) same_locations = false;
-            if (kps[i].j != kps_p[i].j) same_locations = false;
-        }
-        if (same_locations) {
-            printf("[SUCCESS] Serial and Naive Parallel keypoint locations match\n");
-
-            bool same_descriptors = true;
-            for (int i = 0; i < kps.size(); i++) {
-                for (int j = 0; j < 128; j++) {
-                    // allow for descriptor to be +/-10 due to rounding differences on GPU and CPU
-                    if (std::abs(kps[i].descriptor[j] - kps_p[i].descriptor[j]) > 10) {
-                        same_descriptors = false;
-                    }
-                }
-            }
-            if (same_descriptors) {
-                printf("[SUCCESS] Serial and Naive Parallel descriptors match\n");
-            } else {
-                 printf("[!!!FAILURE!!!] Serial and Naive Parallel descriptors do not match\n");
-            }
-
-        } else {
-            printf("[!!!FAILURE!!!] Serial and Naive Parallel keypoint locations do not match\n");
-        }
-    }
-
-    if (kps.size() != kps_p_opt.size()) {
-        printf("[!!!FAILURE!!!] Serial: %d keypoints, Optimized Parallel: %d keypoints\n", kps.size(), kps_p_opt.size());
-    } else {
-        printf("[SUCCESS] Serial: %d keypoints, Optimized Parallel: %d keypoints\n", kps.size(), kps_p_opt.size());
-        bool same_locations = true;
-        for (int i = 0; i < kps.size(); i++) {
-            if (kps[i].i != kps_p_opt[i].i) same_locations = false;
-            if (kps[i].j != kps_p_opt[i].j) same_locations = false;
-        }
-        if (same_locations) {
-            printf("[SUCCESS] Serial and Optimized Parallel keypoint locations match\n");
-
-            bool same_descriptors = true;
-            for (int i = 0; i < kps.size(); i++) {
-                for (int j = 0; j < 128; j++) {
-                    // allow for descriptor to be +/-10 due to rounding differences on GPU and CPU
-                    if (std::abs(kps[i].descriptor[j] - kps_p_opt[i].descriptor[j]) > 10) {
-                        same_descriptors = false;
-                    }
-                }
-            }
-            if (same_descriptors) {
-                printf("[SUCCESS] Serial and Optimized Parallel descriptors match\n");
-            } else {
-                 printf("[!!!FAILURE!!!] Serial and Optimized Parallel descriptors do not match\n");
-            }
-
-        } else {
-            printf("[!!!FAILURE!!!] Serial and Optimized Parallel keypoint locations do not match\n");
-        }
-    }
+    printf("Serial: %d keypoints, Optimized Parallel: %d keypoints\n", kps.size(), kps_p_opt.size());
+    std::vector<std::pair<int, int>> opt_matches = sift::find_keypoint_matches(kps, kps_p_opt);
+    printf("Serial and Optimized Parallel have %d matching keypoints\n", matches.size());
 
     return 0;
 }

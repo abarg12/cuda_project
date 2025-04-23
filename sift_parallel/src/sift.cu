@@ -1324,7 +1324,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
     printf("- keypoint descriptor generation elapsed time: %f ms\n", elapsed_ms);
     total_time += elapsed_ms;
 
-    printf("[SERIAL] Total runtime: %f ms\n", total_time);
+    printf("Total runtime: %f ms\n", total_time);
 
     return kps;
 }
@@ -1376,18 +1376,19 @@ Image gaussian_blur_gpu(const Image& img, float sigma)
     int height = img.height;
 
     // Build 1D Gaussian kernel on host
-    int kSize = static_cast<int>(ceilf(6 * sigma));
+    int kSize = ceilf(6.0f * sigma);
     if (kSize % 2 == 0) ++kSize;
     int kCenter = kSize / 2;
     std::vector<float> h_kernel(kSize);
-    float sum = 0;
-    for (int i = 0; i < kSize; ++i) {
-        int x = i - kCenter;
-        float v = expf(-(x*x) / (2 * sigma * sigma));
-        h_kernel[i] = v; 
+    float sum = 0.0f;
+    for (int k = -kSize/2; k <= kSize/2; k++) {
+        float v = expf(-(k*k) / (2.0f * sigma * sigma));
+        h_kernel[kCenter + k] = v; 
         sum += v;
     }
-    for (auto &v : h_kernel) v /= sum;
+    for (int k = 0; k < kSize; k++) {
+        h_kernel[k] /= sum;
+    }
 
     // Allocate device memory
     float *d_in, *d_tmp, *d_out, *d_kernel;
@@ -1407,11 +1408,12 @@ Image gaussian_blur_gpu(const Image& img, float sigma)
     dim3 grid((width + block.x - 1)/block.x,
               (height+ block.y - 1)/block.y);
 
-   // Column blur
-    gaussianBlurCol<<<grid, block>>>(d_in, d_tmp, width, height, d_kernel, kSize, kCenter);
-    CUDA_CHECK(cudaGetLastError());
     // Row blur
-    gaussianBlurRow<<<grid, block>>>(d_tmp, d_out, width, height, d_kernel, kSize, kCenter);
+    gaussianBlurRow<<<grid, block>>>(d_in, d_tmp, width, height, d_kernel, kSize, kCenter);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Column blur
+    gaussianBlurCol<<<grid, block>>>(d_tmp, d_out, width, height, d_kernel, kSize, kCenter);
     CUDA_CHECK(cudaGetLastError());
 
     // Copy result back
@@ -1436,17 +1438,17 @@ ScaleSpacePyramid generate_gaussian_pyramid_parallel(
     // same setup as serial
     float base_sigma = sigma_min / MIN_PIX_DIST;
     Image base_img = img.resize(img.width*2, img.height*2, Interpolation::BILINEAR);
-    float sigma_diff = std::sqrt(base_sigma*base_sigma - 1.0f);
+    float sigma_diff = sqrtf(base_sigma*base_sigma - 1.0f);
     base_img = gaussian_blur_gpu(base_img, sigma_diff);
 
     int imgs_per_octave = scales_per_octave + 3;
-    float k = std::pow(2, 1.0/scales_per_octave);
+    float k = powf(2, 1.0f/scales_per_octave);
     std::vector<float> sigma_vals(imgs_per_octave);
     sigma_vals[0] = base_sigma;
     for (int i = 1; i < imgs_per_octave; i++) {
-        float prev = base_sigma * std::pow(k, i-1);
+        float prev = base_sigma * powf(k, i-1);
         float total = k * prev;
-        sigma_vals[i] = std::sqrt(total*total - prev*prev);
+        sigma_vals[i] = sqrtf(total*total - prev*prev);
     }
 
     ScaleSpacePyramid pyramid = { num_octaves, imgs_per_octave, std::vector<std::vector<Image>>(num_octaves) };
@@ -1602,7 +1604,8 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
 
     // Generate gradient pyramid
     cudaEventRecord(startEvent, 0);
-    ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid_parallel(gaussian_pyramid);
+    // ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid_parallel(gaussian_pyramid);
+    ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
@@ -1636,7 +1639,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
     cudaEventDestroy(startEvent);
     cudaEventDestroy(stopEvent);
 
-    printf("[PARALLEL NAIVE] Total runtime: %f ms\n", total_time);
+    printf("Total runtime: %f ms\n", total_time);
 
     return kps;
 }
@@ -1661,61 +1664,40 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
     // The timer objects used to record the overall parallel runtime for each
     // phase of SIFT. These time values include allocating and moving memory
     // between the host and device and other overhead like error checking
-    cudaEvent_t startEvent, stopEvent;
-    float elapsedTime;
+    cudaEvent_t startEvent, stopEvent, startTotalEvent, stopTotalEvent;
+    float elapsedTime, totalTime;
     cudaEventCreate(&startEvent);
     cudaEventCreate(&stopEvent);
+    cudaEventCreate(&startTotalEvent);
+    cudaEventCreate(&stopTotalEvent);
 
     printf("--------------------------------------------------\n");
     printf("RUNNING PARALLEL SIFT (OPTIMIZED)\n");
 
+    cudaEventRecord(startTotalEvent, 0);
+
     const Image& input = img.channels == 1 ? img : rgb_to_grayscale(img);
 
     // Generate the Gaussian Pyramid
-    // cudaEventRecord(startEvent, 0);
-    ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid(input, sigma_min, num_octaves,
-                                                                   scales_per_octave);
-    // cudaEventRecord(stopEvent, 0);
-    // cudaEventSynchronize(stopEvent);
-    // cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
-    // printf("[Parallel] generate_gaussian_pyramid elapsed time %f ms\n", elapsedTime);
-    printf("[Unimplemented] optimized generate_gaussian_pyramid not implemented\n");
+    ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid_parallel(input, sigma_min, num_octaves,
+                                                                            scales_per_octave);
 
     // Generate the DoG Pyramid
-    // cudaEventRecord(startEvent, 0);
     ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
-    // cudaEventRecord(stopEvent, 0);
-    // cudaEventSynchronize(stopEvent);
-    // cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
-    // printf("[Parallel] generate_dog_pyramid elapsed time %f ms\n", elapsedTime);
-    printf("[Unimplemented] optimized generate_dog_pyramid not implemented\n");
 
     // Find keypoints
-    // cudaEventRecord(startEvent, 0);
     std::vector<Keypoint> tmp_kps = find_keypoints_parallel_naive(dog_pyramid, contrast_thresh, edge_thresh);
-    // cudaEventRecord(stopEvent, 0);
-    // cudaEventSynchronize(stopEvent);
-    // cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
-    // printf("[Parallel] find_keypoints_parallel elapsed time %f ms\n", elapsedTime);
-    printf("[Unimplemented] optimized find_keypoints_parallel not implemented\n");
 
     // Generate gradient pyramid
-    // cudaEventRecord(startEvent, 0);
     ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
-    // cudaEventRecord(stopEvent, 0);
-    // cudaEventSynchronize(stopEvent);
-    // cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
-    // printf("[Parallel] generate_gradient_pyramid elapsed time %f ms\n", elapsedTime);
-    printf("[Unimplemented] optimized generate_gradient_pyramid not implemented\n");
-
-    // Generate keypoint descriptors
-    cudaEventRecord(startEvent, 0);
 
     // std::vector<Keypoint> kps = find_ori_desc_parallel_combined(tmp_kps,
     //                                                     grad_pyramid,
     //                                                     lambda_ori,
     //                                                     lambda_desc);
 
+    // Generate keypoint descriptors
+    cudaEventRecord(startEvent, 0);
     std::vector<Keypoint> kps = find_ori_desc_parallel_opt(tmp_kps,
                                                         grad_pyramid,
                                                         lambda_ori,
@@ -1723,12 +1705,18 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
 
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
+    cudaEventRecord(stopTotalEvent, 0);
+    cudaEventSynchronize(stopTotalEvent);
     cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
-    printf("[Parallel] keypoint descriptor generation elapsed time %f ms\n", elapsedTime);
-    // printf("[Unimplemented] optimized keypoint descriptor generation not implemented\n");
+    printf("- keypoint descriptor generation elapsed time %f ms\n", elapsedTime);
+    cudaEventElapsedTime(&totalTime, startTotalEvent, stopTotalEvent);
+    printf("Total runtime: %f ms\n", totalTime);
+
 
     cudaEventDestroy(startEvent);
     cudaEventDestroy(stopEvent);
+    cudaEventDestroy(startTotalEvent);
+    cudaEventDestroy(stopTotalEvent);
 
     return kps;
 }
