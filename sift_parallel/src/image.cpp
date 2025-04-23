@@ -250,14 +250,14 @@ Image gaussian_blur(const Image& img, float sigma)
 {
     assert(img.channels == 1);
 
-    int size = std::ceil(6 * sigma);
+    int size = ceilf(6.0f * sigma);
     if (size % 2 == 0)
         size++;
     int center = size / 2;
     Image kernel(size, 1, 1);
     float sum = 0;
     for (int k = -size/2; k <= size/2; k++) {
-        float val = std::exp(-(k*k) / (2*sigma*sigma));
+        float val = expf(-(float)(k*k) / (2.0f*sigma*sigma));
         kernel.set_pixel(center+k, 0, 0, val);
         sum += val;
     }
@@ -281,7 +281,7 @@ Image gaussian_blur(const Image& img, float sigma)
     // convolve horizontal
     for (int x = 0; x < img.width; x++) {
         for (int y = 0; y < img.height; y++) {
-            float sum = 0;
+            float sum = 0.0f;
             for (int k = 0; k < size; k++) {
                 int dx = -center + k;
                 sum += tmp.get_pixel(x+dx, y, 0) * kernel.data[k];

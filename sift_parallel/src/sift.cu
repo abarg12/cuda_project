@@ -40,18 +40,18 @@ ScaleSpacePyramid generate_gaussian_pyramid(const Image& img, float sigma_min,
     // the image with sigma_diff to reach requried base_sigma
     float base_sigma = sigma_min / MIN_PIX_DIST;
     Image base_img = img.resize(img.width*2, img.height*2, Interpolation::BILINEAR);
-    float sigma_diff = std::sqrt(base_sigma*base_sigma - 1.0f);
+    float sigma_diff = sqrtf(base_sigma*base_sigma - 1.0f);
     base_img = gaussian_blur(base_img, sigma_diff);
 
     int imgs_per_octave = scales_per_octave + 3;
 
     // determine sigma values for bluring
-    float k = std::pow(2, 1.0/scales_per_octave);
+    float k = powf(2, 1.0f/scales_per_octave);
     std::vector<float> sigma_vals {base_sigma};
     for (int i = 1; i < imgs_per_octave; i++) {
-        float sigma_prev = base_sigma * std::pow(k, i-1);
+        float sigma_prev = base_sigma * powf(k, i-1);
         float sigma_total = k * sigma_prev;
-        sigma_vals.push_back(std::sqrt(sigma_total*sigma_total - sigma_prev*sigma_prev));
+        sigma_vals.push_back(sqrtf(sigma_total*sigma_total - sigma_prev*sigma_prev));
     }
 
     // create a scale space pyramid of gaussian images
@@ -1329,10 +1329,6 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
     return kps;
 }
 
-/*
- * The parallel 'main' function which calls all necessary functions to compute
- * the keypoints and descriptors. This calls the CUDA parallel implementations.
- */
 
 // Row convolution
 __global__ void gaussianBlurRow(
@@ -1411,11 +1407,11 @@ Image gaussian_blur_gpu(const Image& img, float sigma)
     dim3 grid((width + block.x - 1)/block.x,
               (height+ block.y - 1)/block.y);
 
-    // Row blur
-    gaussianBlurRow<<<grid, block>>>(d_in, d_tmp, width, height, d_kernel, kSize, kCenter);
+   // Column blur
+    gaussianBlurCol<<<grid, block>>>(d_in, d_tmp, width, height, d_kernel, kSize, kCenter);
     CUDA_CHECK(cudaGetLastError());
-    // Column blur
-    gaussianBlurCol<<<grid, block>>>(d_tmp, d_out, width, height, d_kernel, kSize, kCenter);
+    // Row blur
+    gaussianBlurRow<<<grid, block>>>(d_tmp, d_out, width, height, d_kernel, kSize, kCenter);
     CUDA_CHECK(cudaGetLastError());
 
     // Copy result back
@@ -1546,7 +1542,10 @@ ScaleSpacePyramid generate_gradient_pyramid_parallel(
 }
 
 
-
+/*
+ * The parallel 'main' function which calls all necessary functions to compute
+ * the keypoints and descriptors. This calls the CUDA parallel implementations.
+ */
 std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
     const Image& img,
     float sigma_min,
@@ -1576,7 +1575,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
     // Generate the Gaussian Pyramid
     cudaEventRecord(startEvent, 0);
     ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid_parallel(input, sigma_min, num_octaves,
-                                                                   scales_per_octave);
+                                                                            scales_per_octave);
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
