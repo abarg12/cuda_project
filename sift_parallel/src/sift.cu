@@ -1368,6 +1368,8 @@ __global__ void gaussianBlurCol(
     output[y * width + x] = sum;
 }
 
+
+
 // GPU-based gaussian_blur replacement
 Image gaussian_blur_gpu(const Image& img, float sigma)
 {
@@ -1464,6 +1466,8 @@ ScaleSpacePyramid generate_gaussian_pyramid_parallel(
     return pyramid;
 }
 
+
+
 // one thread is mapped to one pixel (x,y)
 __global__ void gradientKernel(
     const float* __restrict__ in,  // single‐channel input
@@ -1490,6 +1494,8 @@ __global__ void gradientKernel(
     out[2*idx + 0] = 0.5f * (r - l);  // gx
     out[2*idx + 1] = 0.5f * (d - u);  // gy
 }
+
+
 
 
 ScaleSpacePyramid generate_gradient_pyramid_parallel(
@@ -1524,15 +1530,20 @@ ScaleSpacePyramid generate_gradient_pyramid_parallel(
         dim3 grid( (W+block.x-1)/block.x,
                    (H+block.y-1)/block.y );
         gradientKernel<<<grid,block>>>(d_in, d_out, W, H);
-        CUDA_CHECK( cudaGetLastError() );
+        CUDA_CHECK(cudaGetLastError());
+		CUDA_CHECK(cudaDeviceSynchronize());
+	
 
         // copy back into a 2‐channel Image
         Image grad(W, H, 2);
-        CUDA_CHECK( cudaMemcpy(grad.data, d_out, out_bytes, cudaMemcpyDeviceToHost) );
+        CUDA_CHECK(cudaMemcpy(grad.data, d_out, out_bytes, cudaMemcpyDeviceToHost));
 
         // free device
         cudaFree(d_in);
         cudaFree(d_out);
+
+
+
 
         grad_pyramid.octaves[o].push_back(std::move(grad));
       }
@@ -1540,6 +1551,77 @@ ScaleSpacePyramid generate_gradient_pyramid_parallel(
 
     return grad_pyramid;
 }
+
+// 1) A simple 1D DoG kernel: one thread per pixel
+__global__ void dogKernel1D(
+    const float* __restrict__ cur,   // current Gaussian image
+    const float* __restrict__ prev,  // previous Gaussian image
+          float*       __restrict__ out,
+    int          N)                  // total pixels
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < N) {
+        out[idx] = cur[idx] - prev[idx];
+    }
+}
+
+// 2) GPU‐parallel DoG pyramid generator
+ScaleSpacePyramid generate_dog_pyramid_parallel(
+    const ScaleSpacePyramid& img_pyramid)
+{
+    int num_octaves     = img_pyramid.num_octaves;
+    int imgs_per_octave = img_pyramid.imgs_per_octave;
+    ScaleSpacePyramid dog_pyramid = {
+        num_octaves,
+        imgs_per_octave - 1,
+        std::vector<std::vector<Image>>(num_octaves)
+    };
+
+    // we'll use 1D blocks of 256 threads
+    const int BLOCK = 256;
+    for (int o = 0; o < num_octaves; ++o) {
+        auto& out_oct = dog_pyramid.octaves[o];
+        out_oct.reserve(imgs_per_octave - 1);
+
+        for (int s = 1; s < imgs_per_octave; ++s) {
+            const Image& Icur  = img_pyramid.octaves[o][s];
+            const Image& Iprev = img_pyramid.octaves[o][s-1];
+            int W = Icur.width, H = Icur.height, C = Icur.channels;
+            int N = W * H * C;
+
+            // 2a) alloc device buffers
+            float *d_cur, *d_prev, *d_out;
+            size_t bytes = N * sizeof(float);
+            CUDA_CHECK(cudaMalloc(&d_cur,  bytes));
+            CUDA_CHECK(cudaMalloc(&d_prev, bytes));
+            CUDA_CHECK(cudaMalloc(&d_out,  bytes));
+
+            // 2b) copy inputs
+            CUDA_CHECK(cudaMemcpy(d_cur,  Icur.data,  bytes, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_prev, Iprev.data, bytes, cudaMemcpyHostToDevice));
+
+            // 2c) launch 1D kernel
+            int grid = (N + BLOCK - 1) / BLOCK;
+            dogKernel1D<<<grid, BLOCK>>>(d_cur, d_prev, d_out, N);
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // 2d) copy back into an Image
+            Image diff(W, H, C);
+            CUDA_CHECK(cudaMemcpy(diff.data, d_out, bytes, cudaMemcpyDeviceToHost));
+
+            // 2e) cleanup
+            cudaFree(d_cur);
+            cudaFree(d_prev);
+            cudaFree(d_out);
+
+            out_oct.push_back(std::move(diff));
+        }
+    }
+
+    return dog_pyramid;
+}
+
 
 
 /*
@@ -1584,7 +1666,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
 
     // Generate the DoG Pyramid
     cudaEventRecord(startEvent, 0);
-    ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
+    ScaleSpacePyramid dog_pyramid = generate_dog_pyramid_parallel(gaussian_pyramid);
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
@@ -1602,7 +1684,8 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
 
     // Generate gradient pyramid
     cudaEventRecord(startEvent, 0);
-    ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid_parallel(gaussian_pyramid);
+    //ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid_parallel(gaussian_pyramid);
+    ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
