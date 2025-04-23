@@ -618,6 +618,8 @@ std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog
                                                       img.width,
                                                       contrast_thresh);
 
+            CUDA_CHECK(cudaGetLastError());
+
             CUDA_CHECK(
                 cudaMemcpy(hostKeypointOutput,
                            deviceKeypointOutput,
@@ -755,6 +757,8 @@ std::vector<std::vector<float>> find_keypoint_orientations_parallel_naive(std::v
                                                        lambda_ori,
                                                        lambda_desc);
 
+    CUDA_CHECK(cudaGetLastError());
+
     CUDA_CHECK(
         cudaMemcpy(hostOrientations, deviceOrientations, kps.size() * N_BINS * sizeof(float), cudaMemcpyDeviceToHost));
 
@@ -888,6 +892,8 @@ void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kps,
                                                        grad_pyramid.imgs_per_octave,
                                                        lambda_desc);
 
+    CUDA_CHECK(cudaGetLastError());
+
     // Copy the descriptors back from the device
     for (size_t i = 0; i < kps.size(); ++i) {
         CUDA_CHECK(cudaMemcpy(kps[i].descriptor.data(), deviceKeypointDescriptors + i * 128,
@@ -1006,6 +1012,8 @@ std::vector<Keypoint> find_ori_desc_parallel_opt(std::vector<Keypoint>& kps,
                                                        lambda_ori,
                                                        lambda_desc);
 
+    CUDA_CHECK(cudaGetLastError());
+
     CUDA_CHECK(
         cudaMemcpy(hostOrientations, deviceOrientations, kps.size() * N_BINS * sizeof(float), cudaMemcpyDeviceToHost));
 
@@ -1077,17 +1085,18 @@ std::vector<Keypoint> find_ori_desc_parallel_opt(std::vector<Keypoint>& kps,
     dim3 gridDimDesc(out_size); // One block per filtered keypoint/orientation
 
     // Shared memory size is NOT specified for static shared memory
-    generate_descriptors_one_block_per_kp<<<gridDimDesc, blockDimDesc>>>(
-        devicePyramid,
-        deviceKeypointsNew,         // Filtered keypoints
-        deviceKeypointDescriptors,  // Output descriptors
-        deviceOrientationsNew,      // Filtered orientations
-        deviceImgOffsets,
-        deviceImgWidths,
-        deviceImgHeights,
-        out_size,                   // Number of filtered keypoints/orientations
-        grad_pyramid.imgs_per_octave,
-        lambda_desc);
+    generate_descriptors_one_block_per_kp<<<gridDimDesc, blockDimDesc>>>(devicePyramid,
+                                                                         deviceKeypointsNew,
+                                                                         deviceKeypointDescriptors,
+                                                                         deviceOrientationsNew,
+                                                                         deviceImgOffsets,
+                                                                         deviceImgWidths,
+                                                                         deviceImgHeights,
+                                                                         out_size,
+                                                                         grad_pyramid.imgs_per_octave,
+                                                                         lambda_desc);
+
+    CUDA_CHECK(cudaGetLastError());
 
 
     // Copy the descriptors back from the device
@@ -1221,6 +1230,7 @@ std::vector<Keypoint> find_ori_desc_parallel_combined(std::vector<Keypoint>& kps
                                                        grad_pyramid.imgs_per_octave,
                                                        lambda_ori,
                                                        lambda_desc);
+    CUDA_CHECK(cudaGetLastError());
 
     CUDA_CHECK(
         cudaMemcpy(hostOrientations, deviceOrientations, kps.size() * N_BINS * sizeof(float), cudaMemcpyDeviceToHost));
