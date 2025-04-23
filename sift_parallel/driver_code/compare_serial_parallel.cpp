@@ -10,7 +10,7 @@ int main(int argc, char *argv[])
     std::cin.tie(NULL);
 
     if (argc != 2) {
-        std::cerr << "Usage: ./serial_and_parallel input.jpg (or .png)\n";
+        std::cerr << "Usage: ./compare_serial_parallel input.jpg (or .png)\n";
         return 0;
     }
     Image img(argv[1]);

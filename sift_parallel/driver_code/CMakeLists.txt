@@ -1,10 +1,10 @@
-add_executable(serial_and_parallel serial_and_parallel.cpp)
+add_executable(compare_serial_parallel compare_serial_parallel.cpp)
 
-target_include_directories(serial_and_parallel PRIVATE ../src)
+target_include_directories(compare_serial_parallel PRIVATE ../src)
 
-target_link_libraries(serial_and_parallel PRIVATE
+target_link_libraries(compare_serial_parallel PRIVATE
                       img
                       sift
 )
 
-SET_TARGET_PROPERTIES(serial_and_parallel PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+SET_TARGET_PROPERTIES(compare_serial_parallel PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)

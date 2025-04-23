@@ -14,7 +14,7 @@ make
 ### How to run on a single image (assumes you are in root project directory `cuda_project`)
 ```
 cd sift_parallel/bin
-./serial_and_parallel ../imgs/ParallelTestData/cat.jpg
+./compare_serial_parallel ../imgs/ParallelTestData/cat.jpg
 ```
 
 ### References:
