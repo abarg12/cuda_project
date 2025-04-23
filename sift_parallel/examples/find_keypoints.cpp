@@ -16,7 +16,7 @@ int main(int argc, char *argv[])
     Image img(argv[1]);
     img =  img.channels == 1 ? img : rgb_to_grayscale(img);
 
-    std::vector<sift::Keypoint> kps = sift::find_keypoints_and_descriptors(img);
+    std::vector<sift::Keypoint> kps = sift::find_keypoints_and_descriptors_parallel(img);
     Image result = sift::draw_keypoints(img, kps);
     result.save("result.jpg");
 

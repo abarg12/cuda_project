@@ -17,8 +17,8 @@ int main(int argc, char *argv[])
     a = a.channels == 1 ? a : rgb_to_grayscale(a);
     b = b.channels == 1 ? b : rgb_to_grayscale(b);
 
-    std::vector<sift::Keypoint> kps_a = sift::find_keypoints_and_descriptors(a);
-    std::vector<sift::Keypoint> kps_b = sift::find_keypoints_and_descriptors(b);
+    std::vector<sift::Keypoint> kps_a = sift::find_keypoints_and_descriptors_parallel(a);
+    std::vector<sift::Keypoint> kps_b = sift::find_keypoints_and_descriptors_parallel(b);
     std::vector<std::pair<int, int>> matches = sift::find_keypoint_matches(kps_a, kps_b);
     Image result = sift::draw_matches(a, b, kps_a, kps_b, matches);
     result.save("result.jpg");
