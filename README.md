@@ -31,12 +31,18 @@ cd sift_parallel/bin
 ./find_keypoints ../imgs/ParallelTestData/cat.jpg
 ```
 
-
 ### Matching features across images using optimized parallel code
 will create/overwrite a `result.jpg` file in current directory with visualized feature matching across images
 ```
 cd sift_parallel/bin
 ./match_features ../imgs/book.png ../imgs/book_in_scene.png
+```
+
+### Run comprehensive timing tests for serial, naive parallel, and optimized parallel
+may take a few minutes to run
+```
+cd sift_parallel/bin
+./time_all
 ```
 
 -------------------------------------------------------------
