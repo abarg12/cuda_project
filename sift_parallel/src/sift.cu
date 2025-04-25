@@ -913,6 +913,113 @@ void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kps,
 /*****************************************************************************/
 /****************** SECTION 3: OPTIMIZED CUDA HOST CODE **********************/
 
+// Identify the location of keypoints within the DoG processed images
+std::vector<Keypoint> find_keypoints_tiled(const ScaleSpacePyramid& dog_pyramid,
+                                            float contrast_thresh,
+                                            float edge_thresh)
+{
+    std::vector<Keypoint> keypoints;
+    for (int i = 0; i < dog_pyramid.num_octaves; i++) {
+        const std::vector<Image>& octave = dog_pyramid.octaves[i];
+        for (int j = 1; j < dog_pyramid.imgs_per_octave-1; j++) {
+            const Image &img = octave[j];
+            const Image &img_down = octave[j - 1];
+            const Image &img_up = octave[j + 1];
+
+
+            // Allocate device memory for the image at 3 different scales
+            // the 3 scales get compared for identifying keypoints
+            int img_size_b = img.size * sizeof(float); 
+            float *deviceImage;
+            CUDA_CHECK(
+                cudaMalloc((void **) &deviceImage, img_size_b * 3)
+            );
+            // Copy over host images to device memory
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage,
+                           img.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            );
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage + img.size,
+                           img_down.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            );
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage + 2 * img.size,
+                           img_up.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            );
+
+            // Allocate device memory for output buffer which is an array with
+            // the same size as the image where a 0 indicates a non-keypoint at
+            // the corresponding pixel position and a 1 indicates a keypoint
+            unsigned int *deviceKeypointOutput;
+            unsigned int *hostKeypointOutput = new unsigned int[img.size];
+            
+            CUDA_CHECK(
+                cudaMalloc((void **) &deviceKeypointOutput, img.size * sizeof(int))
+            );
+            // reset keypoint indicator buffer to all 0s
+            CUDA_CHECK(
+                cudaMemset(deviceKeypointOutput, 0, img.size * sizeof(int))
+            );
+
+
+            dim3 blockDim(8, 8);
+            dim3 gridDim((img.width + blockDim.x - 1) / blockDim.x,
+                        (img.height + blockDim.y - 1) / blockDim.y);
+
+            int tile_size = blockDim.x * blockDim.y;
+            int sharedSize = 3 * tile_size * sizeof(float); // for 3 scales
+
+            identify_keypoints_tiled<<<gridDim, blockDim, sharedSize>>>(deviceImage,
+                                                                        deviceKeypointOutput,
+                                                                        img.size,
+                                                                        img.width,
+                                                                        img.height,
+                                                                        contrast_thresh);
+
+            CUDA_CHECK(cudaGetLastError());
+
+            CUDA_CHECK(
+                cudaMemcpy(hostKeypointOutput,
+                           deviceKeypointOutput,
+                           img.size * sizeof(int),
+                           cudaMemcpyDeviceToHost)
+            );
+
+            int totalkp = 0;
+            for (int ind = 0; ind < img.size; ind++) {
+                if (hostKeypointOutput[ind]) {
+                    totalkp++;
+                }
+            }
+
+            for (int x = 1; x < img.width-1; x++) {
+                for (int y = 1; y < img.height-1; y++) {
+                    int img_idx = x + y * img.width;
+                    if (hostKeypointOutput[img_idx]) {
+                        Keypoint kp = {x, y, i, j, -1, -1, -1, -1};
+                        bool kp_is_valid = refine_or_discard_keypoint(kp, octave, contrast_thresh,
+                                                                      edge_thresh);
+                        if (kp_is_valid) {
+                            keypoints.push_back(kp);
+                        }
+                    }
+                }
+            }
+
+            CUDA_CHECK(cudaFree(deviceImage));
+            CUDA_CHECK(cudaFree(deviceKeypointOutput));
+            delete[] hostKeypointOutput;
+        }
+    }
+    return keypoints;
+}
 
 std::vector<Keypoint> find_ori_desc_parallel_opt(std::vector<Keypoint>& kps,
                                                         const ScaleSpacePyramid& grad_pyramid,
@@ -1683,7 +1790,6 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
 
     printf("--------------------------------------------------\n");
     printf("RUNNING PARALLEL SIFT (OPTIMIZED)\n");
-
     cudaEventRecord(startTotalEvent, 0);
 
     const Image& input = img.channels == 1 ? img : rgb_to_grayscale(img);
@@ -1696,7 +1802,12 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
     ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
 
     // Find keypoints
-    std::vector<Keypoint> tmp_kps = find_keypoints_parallel_naive(dog_pyramid, contrast_thresh, edge_thresh);
+    cudaEventRecord(startEvent, 0);
+    std::vector<Keypoint> tmp_kps = find_keypoints_tiled(dog_pyramid, contrast_thresh, edge_thresh);
+    cudaEventRecord(stopEvent, 0);
+    cudaEventSynchronize(stopEvent);
+    cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
+    printf("- find_keypoints_tiled elapsed time %f ms\n", elapsedTime);
 
     // Generate gradient pyramid
     ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
@@ -1715,10 +1826,11 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
 
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
-    cudaEventRecord(stopTotalEvent, 0);
-    cudaEventSynchronize(stopTotalEvent);
     cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
     printf("- keypoint descriptor generation elapsed time %f ms\n", elapsedTime);
+
+    cudaEventRecord(stopTotalEvent, 0);
+    cudaEventSynchronize(stopTotalEvent);
     cudaEventElapsedTime(&totalTime, startTotalEvent, stopTotalEvent);
     printf("Total runtime: %f ms\n", totalTime);
 
@@ -1913,7 +2025,7 @@ std::vector<std::vector<float>> find_keypoints_and_descriptors_timing(
         opt_total_time += elapsed_ms;
 
         cudaEventRecord(startEvent, 0);
-        std::vector<Keypoint> tmp_kps = find_keypoints_parallel_naive(dog_pyramid, contrast_thresh, edge_thresh);
+        std::vector<Keypoint> tmp_kps = find_keypoints_tiled(dog_pyramid, contrast_thresh, edge_thresh);
         cudaEventRecord(stopEvent, 0);
         cudaEventSynchronize(stopEvent);
         cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
