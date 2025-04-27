@@ -2234,7 +2234,7 @@ std::vector<std::vector<float>> find_keypoints_and_descriptors_timing(
         naive_total_time += elapsed_ms;
 
         cudaEventRecord(startEvent, 0);
-        ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
+        ScaleSpacePyramid dog_pyramid = generate_dog_pyramid_parallel(gaussian_pyramid);
         cudaEventRecord(stopEvent, 0);
         cudaEventSynchronize(stopEvent);
         cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
