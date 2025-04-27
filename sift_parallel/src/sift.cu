@@ -12,6 +12,7 @@
 #include "sift.hpp"
 #include "image.hpp"
 #include "histogram_kernels.cu"
+#include "gaussian_kernels.cu"
 
 
 #define CUDA_CHECK(ans) \
@@ -555,6 +556,166 @@ Image draw_matches(const Image& a, const Image& b, std::vector<Keypoint>& kps_a,
 /*****************************************************************************/
 /******************* SECTION 2: NAIVE CUDA HOST CODE *************************/
 
+// GPU-based gaussian_blur replacement
+Image gaussian_blur_gpu(const Image& img, float sigma)
+{
+    assert(img.channels == 1);
+    int width = img.width;
+    int height = img.height;
+
+    // Build 1D Gaussian kernel on host
+    int kSize = ceilf(6.0f * sigma);
+    if (kSize % 2 == 0) ++kSize;
+    int kCenter = kSize / 2;
+    std::vector<float> h_kernel(kSize);
+    float sum = 0.0f;
+    for (int k = -kSize/2; k <= kSize/2; k++) {
+        float v = expf(-(k*k) / (2.0f * sigma * sigma));
+        h_kernel[kCenter + k] = v; 
+        sum += v;
+    }
+    for (int k = 0; k < kSize; k++) {
+        h_kernel[k] /= sum;
+    }
+
+    // Allocate device memory
+    float *d_in, *d_tmp, *d_out, *d_kernel;
+    size_t imgBytes = width * height * sizeof(float);
+    size_t kernelBytes = kSize * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_in,    imgBytes));
+    CUDA_CHECK(cudaMalloc(&d_tmp,   imgBytes));
+    CUDA_CHECK(cudaMalloc(&d_out,   imgBytes));
+    CUDA_CHECK(cudaMalloc(&d_kernel,kernelBytes));
+
+    // Copy data to device
+    CUDA_CHECK(cudaMemcpy(d_in,     img.data, imgBytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_kernel, h_kernel.data(), kernelBytes, cudaMemcpyHostToDevice));
+
+    // Launch parameters
+    dim3 block(16, 16);
+    dim3 grid((width + block.x - 1)/block.x,
+              (height+ block.y - 1)/block.y);
+
+    // Row blur
+    gaussianBlurRow<<<grid, block>>>(d_in, d_tmp, width, height, d_kernel, kSize, kCenter);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Column blur
+    gaussianBlurCol<<<grid, block>>>(d_tmp, d_out, width, height, d_kernel, kSize, kCenter);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Copy result back
+    Image filtered(width, height, 1);
+    CUDA_CHECK(cudaMemcpy(filtered.data, d_out, imgBytes, cudaMemcpyDeviceToHost));
+
+    // Free
+    cudaFree(d_in);
+    cudaFree(d_tmp);
+    cudaFree(d_out);
+    cudaFree(d_kernel);
+
+    return filtered;
+}
+
+
+ScaleSpacePyramid generate_gaussian_pyramid_parallel(
+    const Image& img, float sigma_min,
+    int num_octaves, int scales_per_octave)
+{
+    // same setup as serial
+    float base_sigma = sigma_min / MIN_PIX_DIST;
+    Image base_img = img.resize(img.width*2, img.height*2, Interpolation::BILINEAR);
+    float sigma_diff = sqrtf(base_sigma*base_sigma - 1.0f);
+    base_img = gaussian_blur_gpu(base_img, sigma_diff);
+
+    int imgs_per_octave = scales_per_octave + 3;
+    float k = powf(2, 1.0f/scales_per_octave);
+    std::vector<float> sigma_vals(imgs_per_octave);
+    sigma_vals[0] = base_sigma;
+    for (int i = 1; i < imgs_per_octave; i++) {
+        float prev = base_sigma * powf(k, i-1);
+        float total = k * prev;
+        sigma_vals[i] = sqrtf(total*total - prev*prev);
+    }
+
+    ScaleSpacePyramid pyramid = { num_octaves, imgs_per_octave, std::vector<std::vector<Image>>(num_octaves) };
+    for (int o = 0; o < num_octaves; ++o) {
+        auto& octave = pyramid.octaves[o];
+        octave.reserve(imgs_per_octave);
+        octave.push_back(std::move(base_img));
+        for (int s = 1; s < imgs_per_octave; ++s) {
+            const Image& prev = octave.back();
+            octave.push_back(gaussian_blur_gpu(prev, sigma_vals[s]));
+        }
+        const Image& next_base = octave[imgs_per_octave - 3];
+        base_img = next_base.resize(next_base.width/2, next_base.height/2, Interpolation::NEAREST);
+    }
+    return pyramid;
+}
+
+
+ScaleSpacePyramid generate_dog_pyramid_parallel(
+    const ScaleSpacePyramid& img_pyramid
+) {
+    int num_octaves    = img_pyramid.num_octaves;
+    int levels_per_oct = img_pyramid.imgs_per_octave;
+    
+    ScaleSpacePyramid dog_pyramid = {
+        num_octaves,
+        levels_per_oct - 1,
+        std::vector<std::vector<Image>>(num_octaves)
+    };
+
+    for (int o = 0; o < num_octaves; ++o) {
+        // all images in this octave share width/height
+        const Image& first = img_pyramid.octaves[o][0];
+        int W = first.width, H = first.height;
+        int N = W * H;
+
+        // reserve space
+        auto& dst = dog_pyramid.octaves[o];
+        dst.reserve(levels_per_oct - 1);
+
+        // allocate device buffers once per octave
+        float *d_curr, *d_prev, *d_out;
+        size_t bytes = N * sizeof(float);
+        CUDA_CHECK(cudaMalloc(&d_curr, bytes));
+        CUDA_CHECK(cudaMalloc(&d_prev, bytes));
+        CUDA_CHECK(cudaMalloc(&d_out,  bytes));
+
+        // set up launch geometry
+        int threads = 256;
+        int blocks  = (N + threads - 1) / threads;
+
+        for (int s = 1; s < levels_per_oct; ++s) {
+            const Image& curr = img_pyramid.octaves[o][s];
+            const Image& prev = img_pyramid.octaves[o][s-1];
+
+            // copy just these two images
+            CUDA_CHECK(cudaMemcpy(d_curr, curr.data, bytes, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_prev, prev.data, bytes, cudaMemcpyHostToDevice));
+
+            // run DoG
+            computeDoG<<<blocks,threads>>>(d_curr, d_prev, d_out, N);
+            CUDA_CHECK(cudaGetLastError());
+
+            // pull result back
+            Image diff(W, H, curr.channels);
+            CUDA_CHECK(cudaMemcpy(diff.data, d_out, bytes, cudaMemcpyDeviceToHost));
+
+            dst.push_back(std::move(diff));
+        }
+
+        // free per-octave
+        cudaFree(d_curr);
+        cudaFree(d_prev);
+        cudaFree(d_out);
+    }
+
+    return dog_pyramid;
+}
+
+
 // Identify the location of keypoints within the DoG processed images
 std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog_pyramid,
                                                     float contrast_thresh,
@@ -654,6 +815,56 @@ std::vector<Keypoint> find_keypoints_parallel_naive(const ScaleSpacePyramid& dog
         }
     }
     return keypoints;
+}
+
+
+ScaleSpacePyramid generate_gradient_pyramid_parallel(
+    const ScaleSpacePyramid& pyramid
+) {
+    ScaleSpacePyramid grad_pyramid = {
+        pyramid.num_octaves,
+        pyramid.imgs_per_octave,
+        std::vector<std::vector<Image>>(pyramid.num_octaves)
+    };
+
+    // one 16×16 block covers 256 threads:
+    dim3 block(16,16);
+
+    for (int o = 0; o < pyramid.num_octaves; ++o) {
+      grad_pyramid.octaves[o].reserve(pyramid.imgs_per_octave);
+
+      for (int s = 0; s < pyramid.imgs_per_octave; ++s) {
+        const Image& src = pyramid.octaves[o][s];
+        int W = src.width, H = src.height;
+        // allocate device buffers
+        float *d_in, *d_out;
+        size_t in_bytes  = W*H*sizeof(float);
+        size_t out_bytes = W*H*2*sizeof(float);
+        CUDA_CHECK( cudaMalloc(&d_in,  in_bytes) );
+        CUDA_CHECK( cudaMalloc(&d_out, out_bytes) );
+
+        // copy input
+        CUDA_CHECK( cudaMemcpy(d_in, src.data, in_bytes, cudaMemcpyHostToDevice) );
+
+        // launch
+        dim3 grid( (W+block.x-1)/block.x,
+                   (H+block.y-1)/block.y );
+        gradientKernel<<<grid,block>>>(d_in, d_out, W, H);
+        CUDA_CHECK( cudaGetLastError() );
+
+        // copy back into a 2‐channel Image
+        Image grad(W, H, 2);
+        CUDA_CHECK( cudaMemcpy(grad.data, d_out, out_bytes, cudaMemcpyDeviceToHost) );
+
+        // free device
+        cudaFree(d_in);
+        cudaFree(d_out);
+
+        grad_pyramid.octaves[o].push_back(std::move(grad));
+      }
+    }
+
+    return grad_pyramid;
 }
 
 
@@ -913,6 +1124,184 @@ void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kps,
 /*****************************************************************************/
 /****************** SECTION 3: OPTIMIZED CUDA HOST CODE **********************/
 
+
+// Persistent device buffers for optimized blur
+static float *d_in_opt = nullptr, *d_tmp_opt = nullptr, *d_out_opt = nullptr, *d_kernel_opt = nullptr;
+static int   capPixels_opt = 0, capKSize_opt = 0;
+
+// Optimized GPU-based Gaussian blur
+Image gaussian_blur_gpu_optimized(const Image& img, float sigma)
+{
+    assert(img.channels == 1);
+    int W = img.width, H = img.height;
+    int pixels = W * H;
+
+    // Build 1D Gaussian kernel on host
+    int kSize = (int)ceilf(6.0f * sigma);
+    if (kSize % 2 == 0) ++kSize;
+    int kCenter = kSize / 2;
+    std::vector<float> h_kernel(kSize);
+    float sum = 0.0f, inv2s = 1.0f / (2.0f * sigma * sigma);
+    for (int i = -kCenter; i <= kCenter; ++i) {
+        float v = expf(-i * i * inv2s);
+        h_kernel[i + kCenter] = v;
+        sum += v;
+    }
+    for (auto &v : h_kernel) v /= sum;
+
+    // (Re)allocate pixel buffers if needed
+    if (pixels > capPixels_opt) {
+        if (d_in_opt) {
+            cudaFree(d_in_opt);
+            cudaFree(d_tmp_opt);
+            cudaFree(d_out_opt);
+        }
+        CUDA_CHECK(cudaMalloc(&d_in_opt,  pixels * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_tmp_opt, pixels * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_out_opt, pixels * sizeof(float)));
+        capPixels_opt = pixels;
+    }
+
+    // (Re)allocate kernel buffer if needed
+    if (kSize > capKSize_opt) {
+        if (d_kernel_opt) cudaFree(d_kernel_opt);
+        CUDA_CHECK(cudaMalloc(&d_kernel_opt, kSize * sizeof(float)));
+        capKSize_opt = kSize;
+    }
+
+    // Copy input image and kernel to device
+    CUDA_CHECK(cudaMemcpy(d_in_opt,     img.data,       pixels * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_kernel_opt, h_kernel.data(), kSize * sizeof(float),    cudaMemcpyHostToDevice));
+
+    // Launch parameters
+    dim3 block(16,16), grid((W+15)/16, (H+15)/16);
+
+    // Row pass
+    gaussianBlurRow_optimized<<<grid, block>>>(d_in_opt, d_tmp_opt, W, H, d_kernel_opt, kSize, kCenter);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Column pass
+    gaussianBlurCol_optimized<<<grid, block>>>(d_tmp_opt, d_out_opt, W, H, d_kernel_opt, kSize, kCenter);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Copy result back to host
+    Image filtered(W, H, 1);
+    CUDA_CHECK(cudaMemcpy(filtered.data, d_out_opt, pixels * sizeof(float), cudaMemcpyDeviceToHost));
+    return filtered;
+}
+
+// Optimized SIFT Gaussian pyramid
+ScaleSpacePyramid generate_gaussian_pyramid_optimized(
+    const Image& img, float sigma_min,
+    int num_octaves, int scales_per_octave)
+{
+    float base_sigma = sigma_min / MIN_PIX_DIST;
+    Image base_img = img.resize(img.width*2, img.height*2, Interpolation::BILINEAR);
+    float sigma_diff = sqrtf(base_sigma*base_sigma - 1.0f);
+    base_img = gaussian_blur_gpu_optimized(base_img, sigma_diff);
+
+    int imgs_per_octave = scales_per_octave + 3;
+    float k = powf(2.0f, 1.0f/scales_per_octave);
+    std::vector<float> sigma_vals(imgs_per_octave);
+    sigma_vals[0] = base_sigma;
+    for (int i = 1; i < imgs_per_octave; ++i) {
+        float p = base_sigma * powf(k, i-1);
+        float t = p * k;
+        sigma_vals[i] = sqrtf(t*t - p*p);
+    }
+
+    ScaleSpacePyramid pyramid{num_octaves, imgs_per_octave,
+        std::vector<std::vector<Image>>(num_octaves)};
+    for (int o = 0; o < num_octaves; ++o) {
+        auto& octave = pyramid.octaves[o];
+        octave.reserve(imgs_per_octave);
+        octave.push_back(std::move(base_img));
+        for (int s = 1; s < imgs_per_octave; ++s) {
+            const Image& prev = octave.back();
+            octave.push_back(gaussian_blur_gpu_optimized(prev, sigma_vals[s]));
+        }
+        const Image& next_base = octave[imgs_per_octave - 3];
+        base_img = next_base.resize(next_base.width/2, next_base.height/2, Interpolation::NEAREST);
+    }
+    return pyramid;
+}
+
+//DoG Pyramid
+// Optimized DoG pyramid
+ScaleSpacePyramid generate_dog_pyramid_optimized(
+    const ScaleSpacePyramid& img_pyramid
+) {
+    int num_octaves    = img_pyramid.num_octaves;
+    int levels_per_oct = img_pyramid.imgs_per_octave;
+
+    ScaleSpacePyramid dog_pyramid{
+        num_octaves,
+        levels_per_oct - 1,
+        std::vector<std::vector<Image>>(num_octaves)
+    };
+
+    // persistent device buffers
+    static float *d_flat = nullptr, *d_out = nullptr;
+    static int   cap_flat = 0, cap_out = 0;
+
+    for (int o = 0; o < num_octaves; ++o) {
+        auto& dst = dog_pyramid.octaves[o];
+        dst.reserve(levels_per_oct - 1);
+
+        const Image& L0 = img_pyramid.octaves[o][0];
+        int W = L0.width, H = L0.height;
+        int N = W * H;
+        int totalIn  = N * levels_per_oct;
+        int totalOut = N * (levels_per_oct - 1);
+
+        // grow d_flat if needed
+        if (totalIn > cap_flat) {
+            if (d_flat) cudaFree(d_flat);
+            CUDA_CHECK(cudaMalloc(&d_flat, totalIn * sizeof(float)));
+            cap_flat = totalIn;
+        }
+        // grow d_out if needed
+        if (totalOut > cap_out) {
+            if (d_out) cudaFree(d_out);
+            CUDA_CHECK(cudaMalloc(&d_out, totalOut * sizeof(float)));
+            cap_out = totalOut;
+        }
+
+        // upload levels into flat buffer
+        for (int s = 0; s < levels_per_oct; ++s) {
+            const Image& img = img_pyramid.octaves[o][s];
+            CUDA_CHECK(cudaMemcpy(
+                d_flat + s * N,
+                img.data,
+                N * sizeof(float),
+                cudaMemcpyHostToDevice
+            ));
+        }
+
+        // launch unified DoG kernel
+        int threads = 256;
+        int blocks  = (totalOut + threads - 1) / threads;
+        computeDoGAll<<<blocks,threads>>>(d_flat, d_out, N, levels_per_oct);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // download each diff image
+        for (int s = 1; s < levels_per_oct; ++s) {
+            Image diff(W, H, L0.channels);
+            CUDA_CHECK(cudaMemcpy(
+                diff.data,
+                d_out + (s-1) * N,
+                N * sizeof(float),
+                cudaMemcpyDeviceToHost
+            ));
+            dst.push_back(std::move(diff));
+        }
+    }
+
+    return dog_pyramid;
+}
+
+
 // Identify the location of keypoints within the DoG processed images
 std::vector<Keypoint> find_keypoints_tiled(const ScaleSpacePyramid& dog_pyramid,
                                             float contrast_thresh,
@@ -1020,6 +1409,86 @@ std::vector<Keypoint> find_keypoints_tiled(const ScaleSpacePyramid& dog_pyramid,
     }
     return keypoints;
 }
+
+
+// Optimized gradient pyramid
+ScaleSpacePyramid generate_gradient_pyramid_optimized(
+    const ScaleSpacePyramid& pyramid)
+{
+    int num_octaves    = pyramid.num_octaves;
+    int levels_per_oct = pyramid.imgs_per_octave;
+    ScaleSpacePyramid grad_pyramid{
+        num_octaves,
+        levels_per_oct,
+        std::vector<std::vector<Image>>(num_octaves)
+    };
+
+    // persistent buffers
+    static float *d_in  = nullptr, *d_out = nullptr;
+    static int   cap_in = 0, cap_out = 0;
+
+    for (int o = 0; o < num_octaves; ++o) {
+        const Image& L0 = pyramid.octaves[o][0];
+        int W = L0.width, H = L0.height;
+        int N = W * H;
+        int totalIn  = levels_per_oct * N;
+        int totalOut = 2 * totalIn;
+
+        // grow d_in if needed
+        if (totalIn > cap_in) {
+            if (d_in) cudaFree(d_in);
+            CUDA_CHECK(cudaMalloc(&d_in, totalIn * sizeof(float)));
+            cap_in = totalIn;
+        }
+        // grow d_out if needed
+        if (totalOut > cap_out) {
+            if (d_out) cudaFree(d_out);
+            CUDA_CHECK(cudaMalloc(&d_out, totalOut * sizeof(float)));
+            cap_out = totalOut;
+        }
+
+        // upload all levels into d_in
+        for (int s = 0; s < levels_per_oct; ++s) {
+            const Image& img = pyramid.octaves[o][s];
+            CUDA_CHECK(cudaMemcpy(
+                d_in + s * N,
+                img.data,
+                N * sizeof(float),
+                cudaMemcpyHostToDevice
+            ));
+        }
+
+        // launch gradient kernel
+        int threads = 256;
+        int blocks  = (totalIn + threads - 1) / threads;
+        gradientKernelAll<<<blocks, threads>>>(d_in, d_out, W, H, levels_per_oct, N);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // download and unpack
+        std::vector<float> h_out(totalOut);
+        CUDA_CHECK(cudaMemcpy(
+            h_out.data(), d_out,
+            totalOut * sizeof(float),
+            cudaMemcpyDeviceToHost
+        ));
+
+        auto& dst = grad_pyramid.octaves[o];
+        dst.reserve(levels_per_oct);
+        for (int s = 0; s < levels_per_oct; ++s) {
+            Image gradImg(W, H, 2);
+            int base = 2 * s * N;
+            for (int i = 0; i < N; ++i) {
+                gradImg.data[2*i + 0] = h_out[base + 2*i + 0];
+                gradImg.data[2*i + 1] = h_out[base + 2*i + 1];
+            }
+            dst.push_back(std::move(gradImg));
+        }
+    }
+
+    return grad_pyramid;
+}
+
 
 std::vector<Keypoint> find_ori_desc_parallel_opt(std::vector<Keypoint>& kps,
                                                         const ScaleSpacePyramid& grad_pyramid,
@@ -1447,298 +1916,6 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
 }
 
 
-// Row convolution
-__global__ void gaussianBlurRow(
-    const float* input, float* output,
-    int width, int height,
-    const float* kernel, int kSize, int kCenter)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
-    float sum = 0.0f;
-    for (int k = 0; k < kSize; ++k) {
-        int dx = x + (k - kCenter);
-        if (dx < 0) dx = 0;
-        if (dx >= width) dx = width - 1;
-        sum += input[y * width + dx] * kernel[k];
-    }
-    output[y * width + x] = sum;
-}
-
-// Column convolution
-__global__ void gaussianBlurCol(
-    const float* input, float* output,
-    int width, int height,
-    const float* kernel, int kSize, int kCenter)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
-    float sum = 0.0f;
-    for (int k = 0; k < kSize; ++k) {
-        int dy = y + (k - kCenter);
-        if (dy < 0) dy = 0;
-        if (dy >= height) dy = height - 1;
-        sum += input[dy * width + x] * kernel[k];
-    }
-    output[y * width + x] = sum;
-}
-
-// GPU-based gaussian_blur replacement
-Image gaussian_blur_gpu(const Image& img, float sigma)
-{
-    assert(img.channels == 1);
-    int width = img.width;
-    int height = img.height;
-
-    // Build 1D Gaussian kernel on host
-    int kSize = ceilf(6.0f * sigma);
-    if (kSize % 2 == 0) ++kSize;
-    int kCenter = kSize / 2;
-    std::vector<float> h_kernel(kSize);
-    float sum = 0.0f;
-    for (int k = -kSize/2; k <= kSize/2; k++) {
-        float v = expf(-(k*k) / (2.0f * sigma * sigma));
-        h_kernel[kCenter + k] = v; 
-        sum += v;
-    }
-    for (int k = 0; k < kSize; k++) {
-        h_kernel[k] /= sum;
-    }
-
-    // Allocate device memory
-    float *d_in, *d_tmp, *d_out, *d_kernel;
-    size_t imgBytes = width * height * sizeof(float);
-    size_t kernelBytes = kSize * sizeof(float);
-    CUDA_CHECK(cudaMalloc(&d_in,    imgBytes));
-    CUDA_CHECK(cudaMalloc(&d_tmp,   imgBytes));
-    CUDA_CHECK(cudaMalloc(&d_out,   imgBytes));
-    CUDA_CHECK(cudaMalloc(&d_kernel,kernelBytes));
-
-    // Copy data to device
-    CUDA_CHECK(cudaMemcpy(d_in,     img.data, imgBytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_kernel, h_kernel.data(), kernelBytes, cudaMemcpyHostToDevice));
-
-    // Launch parameters
-    dim3 block(16, 16);
-    dim3 grid((width + block.x - 1)/block.x,
-              (height+ block.y - 1)/block.y);
-
-    // Row blur
-    gaussianBlurRow<<<grid, block>>>(d_in, d_tmp, width, height, d_kernel, kSize, kCenter);
-    CUDA_CHECK(cudaGetLastError());
-
-    // Column blur
-    gaussianBlurCol<<<grid, block>>>(d_tmp, d_out, width, height, d_kernel, kSize, kCenter);
-    CUDA_CHECK(cudaGetLastError());
-
-    // Copy result back
-    Image filtered(width, height, 1);
-    CUDA_CHECK(cudaMemcpy(filtered.data, d_out, imgBytes, cudaMemcpyDeviceToHost));
-
-    // Free
-    cudaFree(d_in);
-    cudaFree(d_tmp);
-    cudaFree(d_out);
-    cudaFree(d_kernel);
-
-    return filtered;
-}
-
-
-
-ScaleSpacePyramid generate_gaussian_pyramid_parallel(
-    const Image& img, float sigma_min,
-    int num_octaves, int scales_per_octave)
-{
-    // same setup as serial
-    float base_sigma = sigma_min / MIN_PIX_DIST;
-    Image base_img = img.resize(img.width*2, img.height*2, Interpolation::BILINEAR);
-    float sigma_diff = sqrtf(base_sigma*base_sigma - 1.0f);
-    base_img = gaussian_blur_gpu(base_img, sigma_diff);
-
-    int imgs_per_octave = scales_per_octave + 3;
-    float k = powf(2, 1.0f/scales_per_octave);
-    std::vector<float> sigma_vals(imgs_per_octave);
-    sigma_vals[0] = base_sigma;
-    for (int i = 1; i < imgs_per_octave; i++) {
-        float prev = base_sigma * powf(k, i-1);
-        float total = k * prev;
-        sigma_vals[i] = sqrtf(total*total - prev*prev);
-    }
-
-    ScaleSpacePyramid pyramid = { num_octaves, imgs_per_octave, std::vector<std::vector<Image>>(num_octaves) };
-    for (int o = 0; o < num_octaves; ++o) {
-        auto& octave = pyramid.octaves[o];
-        octave.reserve(imgs_per_octave);
-        octave.push_back(std::move(base_img));
-        for (int s = 1; s < imgs_per_octave; ++s) {
-            const Image& prev = octave.back();
-            octave.push_back(gaussian_blur_gpu(prev, sigma_vals[s]));
-        }
-        const Image& next_base = octave[imgs_per_octave - 3];
-        base_img = next_base.resize(next_base.width/2, next_base.height/2, Interpolation::NEAREST);
-    }
-    return pyramid;
-}
-//DoG Parallel Naive
-
-// simple 1-D kernel: out[i] = curr[i] - prev[i]
-__global__ void computeDoG(
-    const float* __restrict__ curr,
-    const float* __restrict__ prev,
-          float* __restrict__ out,
-    int             N
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) {
-        out[idx] = curr[idx] - prev[idx];
-    }
-}
-
-ScaleSpacePyramid generate_dog_pyramid_parallel(
-    const ScaleSpacePyramid& img_pyramid
-) {
-    int num_octaves    = img_pyramid.num_octaves;
-    int levels_per_oct = img_pyramid.imgs_per_octave;
-    
-    ScaleSpacePyramid dog_pyramid = {
-        num_octaves,
-        levels_per_oct - 1,
-        std::vector<std::vector<Image>>(num_octaves)
-    };
-
-    for (int o = 0; o < num_octaves; ++o) {
-        // all images in this octave share width/height
-        const Image& first = img_pyramid.octaves[o][0];
-        int W = first.width, H = first.height;
-        int N = W * H;
-
-        // reserve space
-        auto& dst = dog_pyramid.octaves[o];
-        dst.reserve(levels_per_oct - 1);
-
-        // allocate device buffers once per octave
-        float *d_curr, *d_prev, *d_out;
-        size_t bytes = N * sizeof(float);
-        CUDA_CHECK(cudaMalloc(&d_curr, bytes));
-        CUDA_CHECK(cudaMalloc(&d_prev, bytes));
-        CUDA_CHECK(cudaMalloc(&d_out,  bytes));
-
-        // set up launch geometry
-        int threads = 256;
-        int blocks  = (N + threads - 1) / threads;
-
-        for (int s = 1; s < levels_per_oct; ++s) {
-            const Image& curr = img_pyramid.octaves[o][s];
-            const Image& prev = img_pyramid.octaves[o][s-1];
-
-            // copy just these two images
-            CUDA_CHECK(cudaMemcpy(d_curr, curr.data, bytes, cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(d_prev, prev.data, bytes, cudaMemcpyHostToDevice));
-
-            // run DoG
-            computeDoG<<<blocks,threads>>>(d_curr, d_prev, d_out, N);
-            CUDA_CHECK(cudaGetLastError());
-
-            // pull result back
-            Image diff(W, H, curr.channels);
-            CUDA_CHECK(cudaMemcpy(diff.data, d_out, bytes, cudaMemcpyDeviceToHost));
-
-            dst.push_back(std::move(diff));
-        }
-
-        // free per-octave
-        cudaFree(d_curr);
-        cudaFree(d_prev);
-        cudaFree(d_out);
-    }
-
-    return dog_pyramid;
-}
-
-
-
-
-// one thread is mapped to one pixel (x,y)
-__global__ void gradientKernel(
-    const float* __restrict__ in,  // single‐channel input
-    float*       __restrict__ out, // 2‐channel output (gx,gy interleaved)
-    int width, int height
-) {
-    int x = blockIdx.x*blockDim.x + threadIdx.x;
-    int y = blockIdx.y*blockDim.y + threadIdx.y;
-    if (x < 1 || x >= width-1 || y < 1 || y >= height-1) {
-        // on border, zero‐pad
-        if (x < width && y < height) {
-            out[2*(y*width + x) + 0] = 0.f;
-            out[2*(y*width + x) + 1] = 0.f;
-        }
-        return;
-    }
-
-    int idx = y*width + x;
-    float l = in[y*width + (x-1)];
-    float r = in[y*width + (x+1)];
-    float u = in[(y-1)*width + x];
-    float d = in[(y+1)*width + x];
-
-    out[2*idx + 0] = 0.5f * (r - l);  // gx
-    out[2*idx + 1] = 0.5f * (d - u);  // gy
-}
-
-
-ScaleSpacePyramid generate_gradient_pyramid_parallel(
-    const ScaleSpacePyramid& pyramid
-) {
-    ScaleSpacePyramid grad_pyramid = {
-        pyramid.num_octaves,
-        pyramid.imgs_per_octave,
-        std::vector<std::vector<Image>>(pyramid.num_octaves)
-    };
-
-    // one 16×16 block covers 256 threads:
-    dim3 block(16,16);
-
-    for (int o = 0; o < pyramid.num_octaves; ++o) {
-      grad_pyramid.octaves[o].reserve(pyramid.imgs_per_octave);
-
-      for (int s = 0; s < pyramid.imgs_per_octave; ++s) {
-        const Image& src = pyramid.octaves[o][s];
-        int W = src.width, H = src.height;
-        // allocate device buffers
-        float *d_in, *d_out;
-        size_t in_bytes  = W*H*sizeof(float);
-        size_t out_bytes = W*H*2*sizeof(float);
-        CUDA_CHECK( cudaMalloc(&d_in,  in_bytes) );
-        CUDA_CHECK( cudaMalloc(&d_out, out_bytes) );
-
-        // copy input
-        CUDA_CHECK( cudaMemcpy(d_in, src.data, in_bytes, cudaMemcpyHostToDevice) );
-
-        // launch
-        dim3 grid( (W+block.x-1)/block.x,
-                   (H+block.y-1)/block.y );
-        gradientKernel<<<grid,block>>>(d_in, d_out, W, H);
-        CUDA_CHECK( cudaGetLastError() );
-
-        // copy back into a 2‐channel Image
-        Image grad(W, H, 2);
-        CUDA_CHECK( cudaMemcpy(grad.data, d_out, out_bytes, cudaMemcpyDeviceToHost) );
-
-        // free device
-        cudaFree(d_in);
-        cudaFree(d_out);
-
-        grad_pyramid.octaves[o].push_back(std::move(grad));
-      }
-    }
-
-    return grad_pyramid;
-}
-
-
 /*
  * The parallel 'main' function which calls all necessary functions to compute
  * the keypoints and descriptors. This calls the CUDA parallel implementations.
@@ -1840,354 +2017,6 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
     printf("\n[omitted] parallel Gradient Pyramid\n\n");
 
     return kps;
-}
-// BELOW IS OPTIMIZED PARALLEL FUNCTIONS
-
-// Optimized row convolution kernel
-__global__ void gaussianBlurRow_optimized(
-    const float* input, float* output,
-    int width, int height,
-    const float* kernel, int kSize, int kCenter)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
-    float sum = 0.0f;
-    int base = y * width;
-    for (int k = 0; k < kSize; ++k) {
-        int dx = x + (k - kCenter);
-        dx = dx < 0 ? 0 : (dx >= width ? width - 1 : dx);
-        sum += input[base + dx] * kernel[k];
-    }
-    output[base + x] = sum;
-}
-
-// Optimized column convolution kernel 
-__global__ void gaussianBlurCol_optimized(
-    const float* input, float* output,
-    int width, int height,
-    const float* kernel, int kSize, int kCenter)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
-    float sum = 0.0f;
-    int base = y * width + x;
-    for (int k = 0; k < kSize; ++k) {
-        int dy = y + (k - kCenter);
-        dy = dy < 0 ? 0 : (dy >= height ? height - 1 : dy);
-        sum += input[dy * width + x] * kernel[k];
-    }
-    output[base] = sum;
-}
-
-// Persistent device buffers for optimized blur
-static float *d_in_opt = nullptr, *d_tmp_opt = nullptr, *d_out_opt = nullptr, *d_kernel_opt = nullptr;
-static int   capPixels_opt = 0, capKSize_opt = 0;
-
-// Optimized GPU-based Gaussian blur
-Image gaussian_blur_gpu_optimized(const Image& img, float sigma)
-{
-    assert(img.channels == 1);
-    int W = img.width, H = img.height;
-    int pixels = W * H;
-
-    // Build 1D Gaussian kernel on host
-    int kSize = (int)ceilf(6.0f * sigma);
-    if (kSize % 2 == 0) ++kSize;
-    int kCenter = kSize / 2;
-    std::vector<float> h_kernel(kSize);
-    float sum = 0.0f, inv2s = 1.0f / (2.0f * sigma * sigma);
-    for (int i = -kCenter; i <= kCenter; ++i) {
-        float v = expf(-i * i * inv2s);
-        h_kernel[i + kCenter] = v;
-        sum += v;
-    }
-    for (auto &v : h_kernel) v /= sum;
-
-    // (Re)allocate pixel buffers if needed
-    if (pixels > capPixels_opt) {
-        if (d_in_opt) {
-            cudaFree(d_in_opt);
-            cudaFree(d_tmp_opt);
-            cudaFree(d_out_opt);
-        }
-        CUDA_CHECK(cudaMalloc(&d_in_opt,  pixels * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&d_tmp_opt, pixels * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&d_out_opt, pixels * sizeof(float)));
-        capPixels_opt = pixels;
-    }
-
-    // (Re)allocate kernel buffer if needed
-    if (kSize > capKSize_opt) {
-        if (d_kernel_opt) cudaFree(d_kernel_opt);
-        CUDA_CHECK(cudaMalloc(&d_kernel_opt, kSize * sizeof(float)));
-        capKSize_opt = kSize;
-    }
-
-    // Copy input image and kernel to device
-    CUDA_CHECK(cudaMemcpy(d_in_opt,     img.data,       pixels * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_kernel_opt, h_kernel.data(), kSize * sizeof(float),    cudaMemcpyHostToDevice));
-
-    // Launch parameters
-    dim3 block(16,16), grid((W+15)/16, (H+15)/16);
-
-    // Row pass
-    gaussianBlurRow_optimized<<<grid, block>>>(d_in_opt, d_tmp_opt, W, H, d_kernel_opt, kSize, kCenter);
-    CUDA_CHECK(cudaGetLastError());
-
-    // Column pass
-    gaussianBlurCol_optimized<<<grid, block>>>(d_tmp_opt, d_out_opt, W, H, d_kernel_opt, kSize, kCenter);
-    CUDA_CHECK(cudaGetLastError());
-
-    // Copy result back to host
-    Image filtered(W, H, 1);
-    CUDA_CHECK(cudaMemcpy(filtered.data, d_out_opt, pixels * sizeof(float), cudaMemcpyDeviceToHost));
-    return filtered;
-}
-
-// Optimized SIFT Gaussian pyramid
-ScaleSpacePyramid generate_gaussian_pyramid_optimized(
-    const Image& img, float sigma_min,
-    int num_octaves, int scales_per_octave)
-{
-    float base_sigma = sigma_min / MIN_PIX_DIST;
-    Image base_img = img.resize(img.width*2, img.height*2, Interpolation::BILINEAR);
-    float sigma_diff = sqrtf(base_sigma*base_sigma - 1.0f);
-    base_img = gaussian_blur_gpu_optimized(base_img, sigma_diff);
-
-    int imgs_per_octave = scales_per_octave + 3;
-    float k = powf(2.0f, 1.0f/scales_per_octave);
-    std::vector<float> sigma_vals(imgs_per_octave);
-    sigma_vals[0] = base_sigma;
-    for (int i = 1; i < imgs_per_octave; ++i) {
-        float p = base_sigma * powf(k, i-1);
-        float t = p * k;
-        sigma_vals[i] = sqrtf(t*t - p*p);
-    }
-
-    ScaleSpacePyramid pyramid{num_octaves, imgs_per_octave,
-        std::vector<std::vector<Image>>(num_octaves)};
-    for (int o = 0; o < num_octaves; ++o) {
-        auto& octave = pyramid.octaves[o];
-        octave.reserve(imgs_per_octave);
-        octave.push_back(std::move(base_img));
-        for (int s = 1; s < imgs_per_octave; ++s) {
-            const Image& prev = octave.back();
-            octave.push_back(gaussian_blur_gpu_optimized(prev, sigma_vals[s]));
-        }
-        const Image& next_base = octave[imgs_per_octave - 3];
-        base_img = next_base.resize(next_base.width/2, next_base.height/2, Interpolation::NEAREST);
-    }
-    return pyramid;
-}
-
-//DoG Pyramid
-
-// Kernel that computes all DoG images for one octave in one pass:
-//   for each idx in [0 .. N*(levels-1)):
-//     scale = idx / N, pix = idx % N
-//     out[idx] = flat[(scale+1)*N + pix] - flat[scale*N + pix]
-__global__ void computeDoGAll(
-    const float* __restrict__ flat,  // concatenated input images (levels × N)
-          float* __restrict__ out,   // concatenated output images ((levels-1) × N)
-    int           N,                // pixels per image
-    int           levels            // total levels per octave
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = N * (levels - 1);
-    if (idx < total) {
-        int scale = idx / N;
-        int pix   = idx - scale * N;
-        out[idx]  = flat[(scale+1)*N + pix] - flat[scale*N + pix];
-    }
-}
-
-// Optimized DoG pyramid
-ScaleSpacePyramid generate_dog_pyramid_optimized(
-    const ScaleSpacePyramid& img_pyramid
-) {
-    int num_octaves    = img_pyramid.num_octaves;
-    int levels_per_oct = img_pyramid.imgs_per_octave;
-
-    ScaleSpacePyramid dog_pyramid{
-        num_octaves,
-        levels_per_oct - 1,
-        std::vector<std::vector<Image>>(num_octaves)
-    };
-
-    // persistent device buffers
-    static float *d_flat = nullptr, *d_out = nullptr;
-    static int   cap_flat = 0, cap_out = 0;
-
-    for (int o = 0; o < num_octaves; ++o) {
-        auto& dst = dog_pyramid.octaves[o];
-        dst.reserve(levels_per_oct - 1);
-
-        const Image& L0 = img_pyramid.octaves[o][0];
-        int W = L0.width, H = L0.height;
-        int N = W * H;
-        int totalIn  = N * levels_per_oct;
-        int totalOut = N * (levels_per_oct - 1);
-
-        // grow d_flat if needed
-        if (totalIn > cap_flat) {
-            if (d_flat) cudaFree(d_flat);
-            CUDA_CHECK(cudaMalloc(&d_flat, totalIn * sizeof(float)));
-            cap_flat = totalIn;
-        }
-        // grow d_out if needed
-        if (totalOut > cap_out) {
-            if (d_out) cudaFree(d_out);
-            CUDA_CHECK(cudaMalloc(&d_out, totalOut * sizeof(float)));
-            cap_out = totalOut;
-        }
-
-        // upload levels into flat buffer
-        for (int s = 0; s < levels_per_oct; ++s) {
-            const Image& img = img_pyramid.octaves[o][s];
-            CUDA_CHECK(cudaMemcpy(
-                d_flat + s * N,
-                img.data,
-                N * sizeof(float),
-                cudaMemcpyHostToDevice
-            ));
-        }
-
-        // launch unified DoG kernel
-        int threads = 256;
-        int blocks  = (totalOut + threads - 1) / threads;
-        computeDoGAll<<<blocks,threads>>>(d_flat, d_out, N, levels_per_oct);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        // download each diff image
-        for (int s = 1; s < levels_per_oct; ++s) {
-            Image diff(W, H, L0.channels);
-            CUDA_CHECK(cudaMemcpy(
-                diff.data,
-                d_out + (s-1) * N,
-                N * sizeof(float),
-                cudaMemcpyDeviceToHost
-            ));
-            dst.push_back(std::move(diff));
-        }
-    }
-
-    return dog_pyramid;
-}
-
-// Gradient_Pyramid
-
-// Kernel: compute gradients for all levels in one pass
-//   in: flattened levels (levels × N), out: flattened gradients interleaved (levels × N × 2)
-__global__ void gradientKernelAll(
-    const float* __restrict__ in,    // input flattened: level*N + pix
-          float* __restrict__ out,   // output flattened: 2*(level*N + pix)
-    int           width,
-    int           height,
-    int           levels,
-    int           N)               // pixels per image = width*height
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = levels * N;
-    if (idx >= total) return;
-    int lvl = idx / N;
-    int pix = idx - lvl * N;
-    int x = pix % width;
-    int y = pix / width;
-
-    float gx = 0.0f, gy = 0.0f;
-    if (x > 0 && x < width-1 && y > 0 && y < height-1) {
-        int base = lvl * N;
-        float l = in[base + (y*width + (x-1))];
-        float r = in[base + (y*width + (x+1))];
-        float u = in[base + ((y-1)*width + x)];
-        float d = in[base + ((y+1)*width + x)];
-        gx = 0.5f * (r - l);
-        gy = 0.5f * (d - u);
-    }
-    int outIdx = 2 * idx;
-    out[outIdx + 0] = gx;
-    out[outIdx + 1] = gy;
-}
-
-// Optimized gradient pyramid
-ScaleSpacePyramid generate_gradient_pyramid_optimized(
-    const ScaleSpacePyramid& pyramid)
-{
-    int num_octaves    = pyramid.num_octaves;
-    int levels_per_oct = pyramid.imgs_per_octave;
-    ScaleSpacePyramid grad_pyramid{
-        num_octaves,
-        levels_per_oct,
-        std::vector<std::vector<Image>>(num_octaves)
-    };
-
-    // persistent buffers
-    static float *d_in  = nullptr, *d_out = nullptr;
-    static int   cap_in = 0, cap_out = 0;
-
-    for (int o = 0; o < num_octaves; ++o) {
-        const Image& L0 = pyramid.octaves[o][0];
-        int W = L0.width, H = L0.height;
-        int N = W * H;
-        int totalIn  = levels_per_oct * N;
-        int totalOut = 2 * totalIn;
-
-        // grow d_in if needed
-        if (totalIn > cap_in) {
-            if (d_in) cudaFree(d_in);
-            CUDA_CHECK(cudaMalloc(&d_in, totalIn * sizeof(float)));
-            cap_in = totalIn;
-        }
-        // grow d_out if needed
-        if (totalOut > cap_out) {
-            if (d_out) cudaFree(d_out);
-            CUDA_CHECK(cudaMalloc(&d_out, totalOut * sizeof(float)));
-            cap_out = totalOut;
-        }
-
-        // upload all levels into d_in
-        for (int s = 0; s < levels_per_oct; ++s) {
-            const Image& img = pyramid.octaves[o][s];
-            CUDA_CHECK(cudaMemcpy(
-                d_in + s * N,
-                img.data,
-                N * sizeof(float),
-                cudaMemcpyHostToDevice
-            ));
-        }
-
-        // launch gradient kernel
-        int threads = 256;
-        int blocks  = (totalIn + threads - 1) / threads;
-        gradientKernelAll<<<blocks, threads>>>(d_in, d_out, W, H, levels_per_oct, N);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        // download and unpack
-        std::vector<float> h_out(totalOut);
-        CUDA_CHECK(cudaMemcpy(
-            h_out.data(), d_out,
-            totalOut * sizeof(float),
-            cudaMemcpyDeviceToHost
-        ));
-
-        auto& dst = grad_pyramid.octaves[o];
-        dst.reserve(levels_per_oct);
-        for (int s = 0; s < levels_per_oct; ++s) {
-            Image gradImg(W, H, 2);
-            int base = 2 * s * N;
-            for (int i = 0; i < N; ++i) {
-                gradImg.data[2*i + 0] = h_out[base + 2*i + 0];
-                gradImg.data[2*i + 1] = h_out[base + 2*i + 1];
-            }
-            dst.push_back(std::move(gradImg));
-        }
-    }
-
-    return grad_pyramid;
 }
 
 

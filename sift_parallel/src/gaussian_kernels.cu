@@ -1,18 +1,6 @@
-// CUDA kernels for separable Gaussian blur
-#include <cuda_runtime.h>
-#include <vector>
-#include <cmath>
-#include <cassert>
+// CUDA kernels for constructing Guassian, DoG, and Gradient Pyramids
+#include "sift.hpp"
 
-
-#define CHECK_CUDA(call) do {                                  \
-    cudaError_t err = call;                                    \
-    if (err != cudaSuccess) {                                  \
-        fprintf(stderr, "CUDA error %s:%d: %s\n",          \
-                __FILE__, __LINE__, cudaGetErrorString(err)); \
-        exit(err);                                             \
-    }                                                          \
-} while (0)
 
 // Row convolution
 __global__ void gaussianBlurRow(
@@ -33,6 +21,7 @@ __global__ void gaussianBlurRow(
     output[y * width + x] = sum;
 }
 
+
 // Column convolution
 __global__ void gaussianBlurCol(
     const float* input, float* output,
@@ -52,99 +41,138 @@ __global__ void gaussianBlurCol(
     output[y * width + x] = sum;
 }
 
-// GPU-based gaussian_blur replacement
-Image gaussian_blur_gpu(const Image& img, float sigma)
+
+// Optimized row convolution kernel
+__global__ void gaussianBlurRow_optimized(
+    const float* input, float* output,
+    int width, int height,
+    const float* kernel, int kSize, int kCenter)
 {
-    assert(img.channels == 1);
-    int width = img.width;
-    int height = img.height;
-
-    // Build 1D Gaussian kernel on host
-    int kSize = static_cast<int>(ceilf(6 * sigma));
-    if (kSize % 2 == 0) ++kSize;
-    int kCenter = kSize / 2;
-    std::vector<float> h_kernel(kSize);
-    float sum = 0;
-    for (int i = 0; i < kSize; ++i) {
-        int x = i - kCenter;
-        float v = expf(-(x*x) / (2 * sigma * sigma));
-        h_kernel[i] = v;
-        sum += v;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+    float sum = 0.0f;
+    int base = y * width;
+    for (int k = 0; k < kSize; ++k) {
+        int dx = x + (k - kCenter);
+        dx = dx < 0 ? 0 : (dx >= width ? width - 1 : dx);
+        sum += input[base + dx] * kernel[k];
     }
-    for (auto &v : h_kernel) v /= sum;
-
-    // Allocate device memory
-    float *d_in, *d_tmp, *d_out, *d_kernel;
-    size_t imgBytes = width * height * sizeof(float);
-    size_t kernelBytes = kSize * sizeof(float);
-    CHECK_CUDA(cudaMalloc(&d_in,    imgBytes));
-    CHECK_CUDA(cudaMalloc(&d_tmp,   imgBytes));
-    CHECK_CUDA(cudaMalloc(&d_out,   imgBytes));
-    CHECK_CUDA(cudaMalloc(&d_kernel,kernelBytes));
-
-    // Copy data to device
-    CHECK_CUDA(cudaMemcpy(d_in,     img.data, imgBytes, cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_kernel, h_kernel.data(), kernelBytes, cudaMemcpyHostToDevice));
-
-    // Launch parameters
-    dim3 block(16, 16);
-    dim3 grid((width + block.x - 1)/block.x,
-              (height+ block.y - 1)/block.y);
-
-    // Row blur
-    gaussianBlurRow<<<grid, block>>>(d_in, d_tmp, width, height, d_kernel, kSize, kCenter);
-    CHECK_CUDA(cudaGetLastError());
-    // Column blur
-    gaussianBlurCol<<<grid, block>>>(d_tmp, d_out, width, height, d_kernel, kSize, kCenter);
-    CHECK_CUDA(cudaGetLastError());
-
-    // Copy result back
-    Image filtered(width, height, 1);
-    CHECK_CUDA(cudaMemcpy(filtered.data, d_out, imgBytes, cudaMemcpyDeviceToHost));
-
-    // Free
-    cudaFree(d_in);
-    cudaFree(d_tmp);
-    cudaFree(d_out);
-    cudaFree(d_kernel);
-
-    return filtered;
+    output[base + x] = sum;
 }
 
-// C-callable parallel pyramid generator
-extern "C"
-ScaleSpacePyramid generate_gaussian_pyramid_parallel(
-    const Image& img, float sigma_min,
-    int num_octaves, int scales_per_octave)
+// Optimized column convolution kernel 
+__global__ void gaussianBlurCol_optimized(
+    const float* input, float* output,
+    int width, int height,
+    const float* kernel, int kSize, int kCenter)
 {
-    // same setup as serial
-    float base_sigma = sigma_min / MIN_PIX_DIST;
-    Image base_img = img.resize(img.width*2, img.height*2, Interpolation::BILINEAR);
-    float sigma_diff = std::sqrt(base_sigma*base_sigma - 1.0f);
-    base_img = gaussian_blur_gpu(base_img, sigma_diff);
-
-    int imgs_per_octave = scales_per_octave + 3;
-    float k = std::pow(2, 1.0/scales_per_octave);
-    std::vector<float> sigma_vals(imgs_per_octave);
-    sigma_vals[0] = base_sigma;
-    for (int i = 1; i < imgs_per_octave; i++) {
-        float prev = base_sigma * std::pow(k, i-1);
-        float total = k * prev;
-        sigma_vals[i] = std::sqrt(total*total - prev*prev);
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+    float sum = 0.0f;
+    int base = y * width + x;
+    for (int k = 0; k < kSize; ++k) {
+        int dy = y + (k - kCenter);
+        dy = dy < 0 ? 0 : (dy >= height ? height - 1 : dy);
+        sum += input[dy * width + x] * kernel[k];
     }
+    output[base] = sum;
+}
 
-    ScaleSpacePyramid pyramid = { num_octaves, imgs_per_octave, std::vector<std::vector<Image>>(num_octaves) };
-    for (int o = 0; o < num_octaves; ++o) {
-        auto& octave = pyramid.octaves[o];
-        octave.reserve(imgs_per_octave);
-        octave.push_back(std::move(base_img));
-        for (int s = 1; s < imgs_per_octave; ++s) {
-            const Image& prev = octave.back();
-            octave.push_back(gaussian_blur_gpu(prev, sigma_vals[s]));
+
+//DoG Parallel Naive
+// simple 1-D kernel: out[i] = curr[i] - prev[i]
+__global__ void computeDoG(
+    const float* __restrict__ curr,
+    const float* __restrict__ prev,
+          float* __restrict__ out,
+    int             N
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < N) {
+        out[idx] = curr[idx] - prev[idx];
+    }
+}
+
+
+// Kernel that computes all DoG images for one octave in one pass:
+//   for each idx in [0 .. N*(levels-1)):
+//     scale = idx / N, pix = idx % N
+//     out[idx] = flat[(scale+1)*N + pix] - flat[scale*N + pix]
+__global__ void computeDoGAll(
+    const float* __restrict__ flat,  // concatenated input images (levels × N)
+          float* __restrict__ out,   // concatenated output images ((levels-1) × N)
+    int           N,                // pixels per image
+    int           levels            // total levels per octave
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = N * (levels - 1);
+    if (idx < total) {
+        int scale = idx / N;
+        int pix   = idx - scale * N;
+        out[idx]  = flat[(scale+1)*N + pix] - flat[scale*N + pix];
+    }
+}
+
+
+// one thread is mapped to one pixel (x,y)
+__global__ void gradientKernel(
+    const float* __restrict__ in,  // single‐channel input
+    float*       __restrict__ out, // 2‐channel output (gx,gy interleaved)
+    int width, int height
+) {
+    int x = blockIdx.x*blockDim.x + threadIdx.x;
+    int y = blockIdx.y*blockDim.y + threadIdx.y;
+    if (x < 1 || x >= width-1 || y < 1 || y >= height-1) {
+        // on border, zero‐pad
+        if (x < width && y < height) {
+            out[2*(y*width + x) + 0] = 0.f;
+            out[2*(y*width + x) + 1] = 0.f;
         }
-        const Image& next_base = octave[imgs_per_octave - 3];
-        base_img = next_base.resize(next_base.width/2, next_base.height/2, Interpolation::NEAREST);
+        return;
     }
-    return pyramid;
+
+    int idx = y*width + x;
+    float l = in[y*width + (x-1)];
+    float r = in[y*width + (x+1)];
+    float u = in[(y-1)*width + x];
+    float d = in[(y+1)*width + x];
+
+    out[2*idx + 0] = 0.5f * (r - l);  // gx
+    out[2*idx + 1] = 0.5f * (d - u);  // gy
 }
 
+
+// Kernel: compute gradients for all levels in one pass
+//   in: flattened levels (levels × N), out: flattened gradients interleaved (levels × N × 2)
+__global__ void gradientKernelAll(
+    const float* __restrict__ in,    // input flattened: level*N + pix
+          float* __restrict__ out,   // output flattened: 2*(level*N + pix)
+    int           width,
+    int           height,
+    int           levels,
+    int           N)               // pixels per image = width*height
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = levels * N;
+    if (idx >= total) return;
+    int lvl = idx / N;
+    int pix = idx - lvl * N;
+    int x = pix % width;
+    int y = pix / width;
+
+    float gx = 0.0f, gy = 0.0f;
+    if (x > 0 && x < width-1 && y > 0 && y < height-1) {
+        int base = lvl * N;
+        float l = in[base + (y*width + (x-1))];
+        float r = in[base + (y*width + (x+1))];
+        float u = in[base + ((y-1)*width + x)];
+        float d = in[base + ((y+1)*width + x)];
+        gx = 0.5f * (r - l);
+        gy = 0.5f * (d - u);
+    }
+    int outIdx = 2 * idx;
+    out[outIdx + 0] = gx;
+    out[outIdx + 1] = gy;
+}

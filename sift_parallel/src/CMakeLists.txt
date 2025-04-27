@@ -16,6 +16,7 @@ add_library(sift STATIC
             sift.cu
             sift.hpp
             histogram_kernels.cu
+            gaussian_kernels.cu
 )
 
 target_link_libraries(sift PRIVATE
