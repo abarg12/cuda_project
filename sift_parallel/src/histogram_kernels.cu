@@ -44,17 +44,17 @@ __global__ void identify_keypoints(float *image,
                         continue;
                     }
 
-                    // keypoint comparison to neighbor pixels at same scale
+                    // keypoint comparison to neighbor pixels one scale down
                     neighbor = image[image_down_idx + (dy * image_width) + dx];
                     if (neighbor > val) is_max = false;
                     if (neighbor < val) is_min = false;
 
-                    // keypoint comparison to neighbor pixels one scale down
+                    // keypoint comparison to neighbor pixels one scale up
                     neighbor = image[image_up_idx + (dy * image_width) + dx];
                     if (neighbor > val) is_max = false;
                     if (neighbor < val) is_min = false;
 
-                    // keypoint comparison to neighbor pixels one scale up
+                    // keypoint comparison to neighbor pixels on current scale
                     neighbor = image[image_idx + (dy * image_width) + dx];
                     if (neighbor > val) is_max = false;
                     if (neighbor < val) is_min = false;
@@ -74,6 +74,83 @@ __global__ void identify_keypoints(float *image,
 
     return;
 }
+
+__global__ void identify_keypoints_tiled(float *image,
+                                        unsigned int *keypoints,
+                                        int image_size,
+                                        int image_width,
+                                        int image_height,
+                                        float contrast_thresh) 
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int x = blockIdx.x * blockDim.x + tx;
+    int y = blockIdx.y * blockDim.y + ty;
+    int image_idx = y * image_width + x;
+
+    int tile_width = blockDim.x;
+    int tile_height = blockDim.y;
+    int tile_size = tile_width * tile_height;
+
+    // Declare dynamic shared memory
+    extern __shared__ float shared[];
+    float* tile_current = shared;
+    float* tile_down = &shared[tile_size];
+    float* tile_up = &shared[2 * tile_size];
+
+    int tile_idx = ty * tile_width + tx;
+
+    // load into shared memory
+    if (x < image_width && y < image_height) {
+        int idx_curr = y * image_width + x;
+        int idx_down = idx_curr + image_size;
+        int idx_up   = idx_curr + 2 * image_size;
+
+        tile_current[tile_idx] = image[idx_curr];
+        tile_down[tile_idx]    = image[idx_down];
+        tile_up[tile_idx]      = image[idx_up];
+    }
+
+    __syncthreads();
+
+    if (x > 0 && x < image_width - 1 &&
+        y > 0 && y < (image_height) - 1 &&
+        tx > 0 && tx < tile_width - 1 &&
+        ty > 0 && ty < tile_height - 1)
+    {
+        float val = tile_current[tile_idx];
+
+        if (fabsf(val) >= (0.8f * contrast_thresh)) {
+            bool is_min = true, is_max = true;
+
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    int neighbor_idx = (ty + dy) * tile_width + (tx + dx);
+
+                    float neighbor = tile_down[neighbor_idx];
+                    if (neighbor > val) is_max = false;
+                    if (neighbor < val) is_min = false;
+
+                    neighbor = tile_up[neighbor_idx];
+                    if (neighbor > val) is_max = false;
+                    if (neighbor < val) is_min = false;
+
+                    if (dx != 0 || dy != 0) {
+                        neighbor = tile_current[neighbor_idx];
+                        if (neighbor > val) is_max = false;
+                        if (neighbor < val) is_min = false;
+
+                    }
+
+                    if (!is_min && !is_max) return;
+                }
+            }
+
+            keypoints[image_idx] = 1;
+        }
+    }
+}
+
 
 
 /* Summary:
@@ -705,15 +782,19 @@ __global__ void generate_descriptors_one_block_per_kp(float* gradPyramid,
     int img_height = imgHeights[img_idx];
     float pix_dist = sift::MIN_PIX_DIST * pow(2.0f, kp.octave);
 
-    // allocate a constant amount of shared memory to hold the
-    // descriptor histogram
+    // allocate a constant amount of shared memory to hold the descriptor histogram
     __shared__ float histograms[sift::DESC_HIST_SHARED_SIZE];
 
-    // use one thread to initialize the shared histogram
-    if (threadIdx.x == 0) {
-        for(int i = 0; i < sift::DESC_HIST_SHARED_SIZE; ++i) {
-           histograms[i] = 0.0f;
-       }
+    // unoptimized method: use one thread to initialize the shared histogram
+    // if (threadIdx.x == 0) {
+    //     for(int i = 0; i < sift::DESC_HIST_SHARED_SIZE; ++i) {
+    //        histograms[i] = 0.0f;
+    //    }
+    // }
+
+    // Instead of using one thread, cooperatively load with all threads in block
+    for(int i = threadIdx.x; i < sift::DESC_HIST_SHARED_SIZE; i += blockDim.x) {
+        histograms[i] = 0.0f;
     }
     __syncthreads();
 

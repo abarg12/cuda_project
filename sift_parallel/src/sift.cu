@@ -913,6 +913,113 @@ void compute_keypoint_descriptors_parallel_naive(std::vector<Keypoint>& kps,
 /*****************************************************************************/
 /****************** SECTION 3: OPTIMIZED CUDA HOST CODE **********************/
 
+// Identify the location of keypoints within the DoG processed images
+std::vector<Keypoint> find_keypoints_tiled(const ScaleSpacePyramid& dog_pyramid,
+                                            float contrast_thresh,
+                                            float edge_thresh)
+{
+    std::vector<Keypoint> keypoints;
+    for (int i = 0; i < dog_pyramid.num_octaves; i++) {
+        const std::vector<Image>& octave = dog_pyramid.octaves[i];
+        for (int j = 1; j < dog_pyramid.imgs_per_octave-1; j++) {
+            const Image &img = octave[j];
+            const Image &img_down = octave[j - 1];
+            const Image &img_up = octave[j + 1];
+
+
+            // Allocate device memory for the image at 3 different scales
+            // the 3 scales get compared for identifying keypoints
+            int img_size_b = img.size * sizeof(float); 
+            float *deviceImage;
+            CUDA_CHECK(
+                cudaMalloc((void **) &deviceImage, img_size_b * 3)
+            );
+            // Copy over host images to device memory
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage,
+                           img.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            );
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage + img.size,
+                           img_down.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            );
+            CUDA_CHECK(
+                cudaMemcpy(deviceImage + 2 * img.size,
+                           img_up.data,
+                           img_size_b,
+                           cudaMemcpyHostToDevice)
+            );
+
+            // Allocate device memory for output buffer which is an array with
+            // the same size as the image where a 0 indicates a non-keypoint at
+            // the corresponding pixel position and a 1 indicates a keypoint
+            unsigned int *deviceKeypointOutput;
+            unsigned int *hostKeypointOutput = new unsigned int[img.size];
+            
+            CUDA_CHECK(
+                cudaMalloc((void **) &deviceKeypointOutput, img.size * sizeof(int))
+            );
+            // reset keypoint indicator buffer to all 0s
+            CUDA_CHECK(
+                cudaMemset(deviceKeypointOutput, 0, img.size * sizeof(int))
+            );
+
+
+            dim3 blockDim(8, 8);
+            dim3 gridDim((img.width + blockDim.x - 1) / blockDim.x,
+                        (img.height + blockDim.y - 1) / blockDim.y);
+
+            int tile_size = blockDim.x * blockDim.y;
+            int sharedSize = 3 * tile_size * sizeof(float); // for 3 scales
+
+            identify_keypoints_tiled<<<gridDim, blockDim, sharedSize>>>(deviceImage,
+                                                                        deviceKeypointOutput,
+                                                                        img.size,
+                                                                        img.width,
+                                                                        img.height,
+                                                                        contrast_thresh);
+
+            CUDA_CHECK(cudaGetLastError());
+
+            CUDA_CHECK(
+                cudaMemcpy(hostKeypointOutput,
+                           deviceKeypointOutput,
+                           img.size * sizeof(int),
+                           cudaMemcpyDeviceToHost)
+            );
+
+            int totalkp = 0;
+            for (int ind = 0; ind < img.size; ind++) {
+                if (hostKeypointOutput[ind]) {
+                    totalkp++;
+                }
+            }
+
+            for (int x = 1; x < img.width-1; x++) {
+                for (int y = 1; y < img.height-1; y++) {
+                    int img_idx = x + y * img.width;
+                    if (hostKeypointOutput[img_idx]) {
+                        Keypoint kp = {x, y, i, j, -1, -1, -1, -1};
+                        bool kp_is_valid = refine_or_discard_keypoint(kp, octave, contrast_thresh,
+                                                                      edge_thresh);
+                        if (kp_is_valid) {
+                            keypoints.push_back(kp);
+                        }
+                    }
+                }
+            }
+
+            CUDA_CHECK(cudaFree(deviceImage));
+            CUDA_CHECK(cudaFree(deviceKeypointOutput));
+            delete[] hostKeypointOutput;
+        }
+    }
+    return keypoints;
+}
 
 std::vector<Keypoint> find_ori_desc_parallel_opt(std::vector<Keypoint>& kps,
                                                         const ScaleSpacePyramid& grad_pyramid,
@@ -2109,7 +2216,6 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
 
     printf("--------------------------------------------------\n");
     printf("RUNNING PARALLEL SIFT (OPTIMIZED)\n");
-
     cudaEventRecord(startTotalEvent, 0);
 
     const Image& input = img.channels == 1 ? img : rgb_to_grayscale(img);
@@ -2136,7 +2242,12 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
     printf("- DoG pyramid elapsed time %f ms\n", elapsedTime);
 
     // Find keypoints
-    std::vector<Keypoint> tmp_kps = find_keypoints_parallel_naive(dog_pyramid, contrast_thresh, edge_thresh);
+    cudaEventRecord(startEvent, 0);
+    std::vector<Keypoint> tmp_kps = find_keypoints_tiled(dog_pyramid, contrast_thresh, edge_thresh);
+    cudaEventRecord(stopEvent, 0);
+    cudaEventSynchronize(stopEvent);
+    cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
+    printf("- find_keypoints_tiled elapsed time %f ms\n", elapsedTime);
 
     cudaEventRecord(startEvent, 0);
     // Generate gradient pyramid
@@ -2161,10 +2272,11 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
 
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
-    cudaEventRecord(stopTotalEvent, 0);
-    cudaEventSynchronize(stopTotalEvent);
     cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
     printf("- keypoint descriptor generation elapsed time %f ms\n", elapsedTime);
+
+    cudaEventRecord(stopTotalEvent, 0);
+    cudaEventSynchronize(stopTotalEvent);
     cudaEventElapsedTime(&totalTime, startTotalEvent, stopTotalEvent);
     printf("Total runtime: %f ms\n", totalTime);
 
@@ -2175,6 +2287,223 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
     cudaEventDestroy(stopTotalEvent);
 
     return kps;
+}
+
+
+/*
+ * Timing utility function that finds averaged timing results
+ * for serial and parallel code run over 10 different images
+ */
+std::vector<std::vector<float>> find_keypoints_and_descriptors_timing(
+    std::vector<Image> imgs,
+    float sigma_min,
+    int num_octaves,
+    int scales_per_octave, 
+    float contrast_thresh,
+    float edge_thresh, 
+    float lambda_ori,
+    float lambda_desc)
+{
+    int phases = 6; // gaussian, DoG, kps, gradient pyramid, descriptors, total time
+    int sift_types = 3; // serial, parallel naive, parallel optimized
+
+    std::vector<std::vector<float>> timing_data(phases, std::vector<float>(sift_types, 0.0f));
+
+    int num_imgs = imgs.size();
+
+    std::chrono::time_point<std::chrono::high_resolution_clock> start;
+    std::chrono::time_point<std::chrono::high_resolution_clock> end;
+
+    // Run and time serial SIFT
+    float serial_gaus_time = 0.0f;
+    float serial_dog_time = 0.0f;
+    float serial_kps_time = 0.0f;
+    float serial_grad_time = 0.0f;
+    float serial_desc_time = 0.0f;
+    float serial_total_time = 0.0f;
+    for (int i = 0; i < num_imgs; i++) {
+        start = std::chrono::high_resolution_clock::now();
+        ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid(imgs[i], sigma_min, num_octaves, scales_per_octave);
+        end = std::chrono::high_resolution_clock::now();
+        serial_gaus_time += std::chrono::duration<float, std::milli>(end - start).count();
+        serial_total_time += std::chrono::duration<float, std::milli>(end - start).count();
+        
+        start = std::chrono::high_resolution_clock::now();
+        ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
+        end = std::chrono::high_resolution_clock::now();
+        serial_dog_time += std::chrono::duration<float, std::milli>(end - start).count();
+        serial_total_time += std::chrono::duration<float, std::milli>(end - start).count();
+
+        start = std::chrono::high_resolution_clock::now();
+        std::vector<Keypoint> tmp_kps = find_keypoints(dog_pyramid, contrast_thresh, edge_thresh);
+        end = std::chrono::high_resolution_clock::now();
+        serial_kps_time += std::chrono::duration<float, std::milli>(end - start).count();
+        serial_total_time += std::chrono::duration<float, std::milli>(end - start).count();
+
+        start = std::chrono::high_resolution_clock::now();
+        ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
+        end = std::chrono::high_resolution_clock::now();
+        serial_grad_time += std::chrono::duration<float, std::milli>(end - start).count();
+        serial_total_time += std::chrono::duration<float, std::milli>(end - start).count();
+
+        start = std::chrono::high_resolution_clock::now();
+        std::vector<Keypoint> kps;
+        for (Keypoint& kp_tmp : tmp_kps) {
+            std::vector<float> orientations = find_keypoint_orientations(kp_tmp, grad_pyramid,
+                                                                        lambda_ori, lambda_desc);
+            
+            for (float theta : orientations) {
+                Keypoint kp = kp_tmp;
+                compute_keypoint_descriptor(kp, theta, grad_pyramid, lambda_desc);
+                kps.push_back(kp);
+            }
+        }
+        end = std::chrono::high_resolution_clock::now();
+        serial_desc_time += std::chrono::duration<float, std::milli>(end - start).count();
+        serial_total_time += std::chrono::duration<float, std::milli>(end - start).count();
+    }
+    
+    timing_data[0][0] = serial_gaus_time / num_imgs;
+    timing_data[1][0] = serial_dog_time / num_imgs;
+    timing_data[2][0] = serial_kps_time / num_imgs;
+    timing_data[3][0] = serial_grad_time / num_imgs;
+    timing_data[4][0] = serial_desc_time / num_imgs;
+    timing_data[5][0] = serial_total_time / num_imgs;
+
+
+    cudaEvent_t startEvent, stopEvent;
+    cudaEventCreate(&startEvent);
+    cudaEventCreate(&stopEvent);
+    float elapsed_ms;
+
+    // Run and time naive parallel SIFT
+    float naive_gaus_time = 0.0f;
+    float naive_dog_time = 0.0f;
+    float naive_kps_time = 0.0f;
+    float naive_grad_time = 0.0f;
+    float naive_desc_time = 0.0f;
+    float naive_total_time = 0.0f;
+    for (int i = 0; i < num_imgs; i++) {
+        cudaEventRecord(startEvent, 0);
+        ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid_parallel(imgs[i], sigma_min, num_octaves, scales_per_octave);
+        cudaEventRecord(stopEvent, 0);
+        cudaEventSynchronize(stopEvent);
+        cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
+        naive_gaus_time += elapsed_ms;
+        naive_total_time += elapsed_ms;
+
+        cudaEventRecord(startEvent, 0);
+        ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
+        cudaEventRecord(stopEvent, 0);
+        cudaEventSynchronize(stopEvent);
+        cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
+        naive_dog_time += elapsed_ms;
+        naive_total_time += elapsed_ms;
+
+        cudaEventRecord(startEvent, 0);
+        std::vector<Keypoint> tmp_kps = find_keypoints_parallel_naive(dog_pyramid, contrast_thresh, edge_thresh);
+        cudaEventRecord(stopEvent, 0);
+        cudaEventSynchronize(stopEvent);
+        cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
+        naive_kps_time += elapsed_ms;
+        naive_total_time += elapsed_ms;
+
+        cudaEventRecord(startEvent, 0);
+        ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
+        cudaEventRecord(stopEvent, 0);
+        cudaEventSynchronize(stopEvent);
+        cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
+        naive_grad_time += elapsed_ms;
+        naive_total_time += elapsed_ms;
+
+        cudaEventRecord(startEvent, 0);
+        std::vector<std::vector<float>> orientations_parallel = find_keypoint_orientations_parallel_naive
+                                                                (tmp_kps, grad_pyramid, lambda_ori, lambda_desc);
+        std::vector<Keypoint> kps;
+        for (int i = 0; i < orientations_parallel.size(); i++) {
+            for (float theta : orientations_parallel[i]) {
+                Keypoint kp = tmp_kps[i];
+                kps.push_back(kp);
+            }
+        }
+        std::vector<float> one_dim_orienations;
+        for (const auto& row : orientations_parallel) {
+            one_dim_orienations.insert(one_dim_orienations.end(), row.begin(), row.end());
+        }
+        compute_keypoint_descriptors_parallel_naive(kps, one_dim_orienations, grad_pyramid, lambda_desc);
+        cudaEventRecord(stopEvent, 0);
+        cudaEventSynchronize(stopEvent);
+        cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
+        naive_desc_time += elapsed_ms;
+        naive_total_time += elapsed_ms;
+    }
+
+    timing_data[0][1] = naive_gaus_time / num_imgs;
+    timing_data[1][1] = naive_dog_time / num_imgs;
+    timing_data[2][1] = naive_kps_time / num_imgs;
+    timing_data[3][1] = naive_grad_time / num_imgs;
+    timing_data[4][1] = naive_desc_time / num_imgs;
+    timing_data[5][1] = naive_total_time / num_imgs;
+
+
+    // Run and time optimized parallel SIFT
+    float opt_gaus_time = 0.0f;
+    float opt_dog_time = 0.0f;
+    float opt_kps_time = 0.0f;
+    float opt_grad_time = 0.0f;
+    float opt_desc_time = 0.0f;
+    float opt_total_time = 0.0f;
+    for (int i = 0; i < num_imgs; i++) {
+        cudaEventRecord(startEvent, 0);
+        ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid_parallel(imgs[i], sigma_min, num_octaves, scales_per_octave);
+        cudaEventRecord(stopEvent, 0);
+        cudaEventSynchronize(stopEvent);
+        cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
+        opt_gaus_time += elapsed_ms;
+        opt_total_time += elapsed_ms;
+
+        cudaEventRecord(startEvent, 0);
+        ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
+        cudaEventRecord(stopEvent, 0);
+        cudaEventSynchronize(stopEvent);
+        cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
+        opt_dog_time += elapsed_ms;
+        opt_total_time += elapsed_ms;
+
+        cudaEventRecord(startEvent, 0);
+        std::vector<Keypoint> tmp_kps = find_keypoints_tiled(dog_pyramid, contrast_thresh, edge_thresh);
+        cudaEventRecord(stopEvent, 0);
+        cudaEventSynchronize(stopEvent);
+        cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
+        opt_kps_time += elapsed_ms;
+        opt_total_time += elapsed_ms;
+
+        cudaEventRecord(startEvent, 0);
+        ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
+        cudaEventRecord(stopEvent, 0);
+        cudaEventSynchronize(stopEvent);
+        cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
+        opt_grad_time += elapsed_ms;
+        opt_total_time += elapsed_ms;
+
+        cudaEventRecord(startEvent, 0);
+        std::vector<Keypoint> kps = find_ori_desc_parallel_opt(tmp_kps, grad_pyramid, lambda_ori, lambda_desc);
+        cudaEventRecord(stopEvent, 0);
+        cudaEventSynchronize(stopEvent);
+        cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
+        opt_desc_time += elapsed_ms;
+        opt_total_time += elapsed_ms;
+    }
+
+    timing_data[0][2] = opt_gaus_time / num_imgs;
+    timing_data[1][2] = opt_dog_time / num_imgs;
+    timing_data[2][2] = opt_kps_time / num_imgs;
+    timing_data[3][2] = opt_grad_time / num_imgs;
+    timing_data[4][2] = opt_desc_time / num_imgs;
+    timing_data[5][2] = opt_total_time / num_imgs;
+
+
+    return timing_data;
 }
 
 } // namespace sift

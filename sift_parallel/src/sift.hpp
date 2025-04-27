@@ -347,6 +347,33 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
         float lambda_ori=LAMBDA_ORI,
         float lambda_desc=LAMBDA_DESC);
 
+
+/* Summary:
+ *     Timing utility code to find runtime for serial, naive parallel,
+ *     and optimized parallel SIFT over a variety of images.
+ * Parameters:
+ *   - img: the input image which will be scanned for features
+ *   - sigma_min: base scale for image in first octave and first sclae
+ *   - num_octaves: total number of octaves to generate in scale space
+ *   - scales_per_octave: number of scale steps within in octave
+ *   - contrast_thresh: threshold used to filter out low contrast keypoints
+ *   - edge_thresh: threshold to filter out keypoints located on edges
+ *   - lambda_ori: controls the window size used for orientation histogram
+ *   - lambda_desc: used in weighting the orientations of the descriptor
+ * Return:
+ *     Vector of floats representing timing data. 
+ */
+std::vector<std::vector<float>> find_keypoints_and_descriptors_timing(
+        std::vector<Image> imgs,
+        float sigma_min=SIGMA_MIN,
+        int num_octaves=N_OCT, 
+        int scales_per_octave=N_SPO, 
+        float contrast_thresh=C_DOG,
+        float edge_thresh=C_EDGE,
+        float lambda_ori=LAMBDA_ORI,
+        float lambda_desc=LAMBDA_DESC);
+
+
 /* Summary:
  *     Finds matches between two sets of keypoints based on SIFT descriptors
  * Parameters:
