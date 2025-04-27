@@ -34,7 +34,7 @@ int main(int argc, char *argv[])
 
     printf("Serial: %d keypoints, Optimized Parallel: %d keypoints\n", kps.size(), kps_p_opt.size());
     std::vector<std::pair<int, int>> opt_matches = sift::find_keypoint_matches(kps, kps_p_opt);
-    printf("Serial and Optimized Parallel have %d matching keypoints\n", matches.size());
+    printf("Serial and Optimized Parallel have %d matching keypoints\n", opt_matches.size());
 
     return 0;
 }
