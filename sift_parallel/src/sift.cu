@@ -1396,7 +1396,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
                                                                    scales_per_octave);
     auto t_end = std::chrono::high_resolution_clock::now();
     double elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    printf("- generate_gaussian_pyramid elapsed time: %f ms\n", elapsed_ms);
+    printf("- Gaussian Pyramid elapsed time: %f ms\n", elapsed_ms);
     total_time += elapsed_ms;
 
     // Generate the DoG Pyramid
@@ -1404,7 +1404,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
     ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
     t_end = std::chrono::high_resolution_clock::now();
     elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    printf("- generate_dog_pyramid elapsed time: %f ms\n", elapsed_ms);
+    printf("- DoG Pyramid elapsed time: %f ms\n", elapsed_ms);
     total_time += elapsed_ms;
 
     // Find keypoints
@@ -1412,7 +1412,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
     std::vector<Keypoint> tmp_kps = find_keypoints(dog_pyramid, contrast_thresh, edge_thresh);
     t_end = std::chrono::high_resolution_clock::now();
     elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    printf("- find_keypoints elapsed time: %f ms\n", elapsed_ms);
+    printf("- Find Keypoints elapsed time: %f ms\n", elapsed_ms);
     total_time += elapsed_ms;
     
     // Generate gradient pyramid
@@ -1420,7 +1420,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
     ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
     t_end = std::chrono::high_resolution_clock::now();
     elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    printf("- generate_gradient_pyramid elapsed time: %f ms\n", elapsed_ms);
+    printf("- Gradient Pyramid elapsed time: %f ms\n", elapsed_ms);
     total_time += elapsed_ms;
 
     // Generate keypoint descriptors
@@ -1438,10 +1438,10 @@ std::vector<Keypoint> find_keypoints_and_descriptors(const Image& img, float sig
     }
     t_end = std::chrono::high_resolution_clock::now();
     elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    printf("- keypoint descriptor generation elapsed time: %f ms\n", elapsed_ms);
+    printf("- Keypoint Descriptor elapsed time: %f ms\n", elapsed_ms);
     total_time += elapsed_ms;
 
-    printf("Total runtime: %f ms\n", total_time);
+    printf("Total runtime: %f ms\n\n", total_time);
 
     return kps;
 }
@@ -1776,7 +1776,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
-    printf("- generate_gaussian_pyramid elapsed time %f ms\n", elapsed_ms);
+    printf("- Gaussian Pyramid elapsed time %f ms\n", elapsed_ms);
     total_time += elapsed_ms;
 
     // Generate the DoG Pyramid
@@ -1785,7 +1785,7 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
-    printf("- generate_dog_pyramid elapsed time %f ms\n", elapsed_ms);
+    printf("- DoG Pyramid elapsed time %f ms\n", elapsed_ms);
     total_time += elapsed_ms;
 
     // Find keypoints
@@ -1794,17 +1794,18 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
-    printf("- find_keypoints_parallel elapsed time %f ms\n", elapsed_ms);
+    printf("- Find Keypoints elapsed time %f ms\n", elapsed_ms);
     total_time += elapsed_ms;
 
     // Generate gradient pyramid
     cudaEventRecord(startEvent, 0);
+    // This parallel code does not pass the accuracy verification
     // ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid_parallel(gaussian_pyramid);
     ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
-    printf("- generate_gradient_pyramid elapsed time %f ms\n", elapsed_ms);
+    // printf("- generate_gradient_pyramid elapsed time %f ms\n", elapsed_ms);
     total_time += elapsed_ms;
 
     // Generate keypoint descriptors
@@ -1828,13 +1829,15 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel_naive(
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
-    printf("- keypoint descriptor generation elapsed time %f ms\n", elapsed_ms);
+    printf("- Keypoint Descriptor elapsed time %f ms\n", elapsed_ms);
     total_time += elapsed_ms;
 
     cudaEventDestroy(startEvent);
     cudaEventDestroy(stopEvent);
 
     printf("Total runtime: %f ms\n", total_time);
+
+    printf("\n[omitted] parallel Gradient Pyramid\n\n");
 
     return kps;
 }
@@ -2242,28 +2245,34 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
     printf("- DoG pyramid elapsed time %f ms\n", elapsedTime);
 
     // Find keypoints
-    cudaEventRecord(startEvent, 0);
-    std::vector<Keypoint> tmp_kps = find_keypoints_tiled(dog_pyramid, contrast_thresh, edge_thresh);
-    cudaEventRecord(stopEvent, 0);
-    cudaEventSynchronize(stopEvent);
-    cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
-    printf("- find_keypoints_tiled elapsed time %f ms\n", elapsedTime);
+    // cudaEventRecord(startEvent, 0);
+    // This optimized code fails the accuracy verifications
+    // std::vector<Keypoint> tmp_kps = find_keypoints_tiled(dog_pyramid, contrast_thresh, edge_thresh);
+    std::vector<Keypoint> tmp_kps = find_keypoints_parallel_naive(dog_pyramid, contrast_thresh, edge_thresh);
+    // cudaEventRecord(stopEvent, 0);
+    // cudaEventSynchronize(stopEvent);
+    // cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
+    // printf("- find_keypoints_tiled elapsed time %f ms\n", elapsedTime);
 
-    cudaEventRecord(startEvent, 0);
     // Generate gradient pyramid
-    ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid_optimized(gaussian_pyramid);
-    cudaEventRecord(stopEvent, 0);
-    cudaEventSynchronize(stopEvent);
-    cudaEventRecord(stopTotalEvent, 0);
-    cudaEventSynchronize(stopTotalEvent);
-    cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
-    printf("- Gradient pyramid elapsed time %f ms\n", elapsedTime);
+    // cudaEventRecord(startEvent, 0);
+    // This optimized code fails the accuracy verifications
+    // ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid_optimized(gaussian_pyramid);
+    ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
+    // cudaEventRecord(stopEvent, 0);
+    // cudaEventSynchronize(stopEvent);
+    // cudaEventRecord(stopTotalEvent, 0);
+    // cudaEventSynchronize(stopTotalEvent);
+    // cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
+    // printf("- Gradient pyramid elapsed time %f ms\n", elapsedTime);
+
+    // Generate keypoint descriptors
+
+    // This was V1 of the optimized kernel which ran slower than the naive parallel
     // std::vector<Keypoint> kps = find_ori_desc_parallel_combined(tmp_kps,
     //                                                     grad_pyramid,
     //                                                     lambda_ori,
     //                                                     lambda_desc);
-
-    // Generate keypoint descriptors
     cudaEventRecord(startEvent, 0);
     std::vector<Keypoint> kps = find_ori_desc_parallel_opt(tmp_kps,
                                                         grad_pyramid,
@@ -2279,6 +2288,9 @@ std::vector<Keypoint> find_keypoints_and_descriptors_parallel(
     cudaEventSynchronize(stopTotalEvent);
     cudaEventElapsedTime(&totalTime, startTotalEvent, stopTotalEvent);
     printf("Total runtime: %f ms\n", totalTime);
+
+    printf("\n[omitted] optimized Find Keypoints\n");
+    printf("[omitted] optimized Gradient Pyramid\n\n");
 
 
     cudaEventDestroy(startEvent);
@@ -2455,7 +2467,7 @@ std::vector<std::vector<float>> find_keypoints_and_descriptors_timing(
     float opt_total_time = 0.0f;
     for (int i = 0; i < num_imgs; i++) {
         cudaEventRecord(startEvent, 0);
-        ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid_parallel(imgs[i], sigma_min, num_octaves, scales_per_octave);
+        ScaleSpacePyramid gaussian_pyramid = generate_gaussian_pyramid_optimized(imgs[i], sigma_min, num_octaves, scales_per_octave);
         cudaEventRecord(stopEvent, 0);
         cudaEventSynchronize(stopEvent);
         cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
@@ -2463,7 +2475,7 @@ std::vector<std::vector<float>> find_keypoints_and_descriptors_timing(
         opt_total_time += elapsed_ms;
 
         cudaEventRecord(startEvent, 0);
-        ScaleSpacePyramid dog_pyramid = generate_dog_pyramid(gaussian_pyramid);
+        ScaleSpacePyramid dog_pyramid = generate_dog_pyramid_optimized(gaussian_pyramid);
         cudaEventRecord(stopEvent, 0);
         cudaEventSynchronize(stopEvent);
         cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
@@ -2471,7 +2483,9 @@ std::vector<std::vector<float>> find_keypoints_and_descriptors_timing(
         opt_total_time += elapsed_ms;
 
         cudaEventRecord(startEvent, 0);
-        std::vector<Keypoint> tmp_kps = find_keypoints_tiled(dog_pyramid, contrast_thresh, edge_thresh);
+        // This optimized code fails the accuracy verifications
+        // std::vector<Keypoint> tmp_kps = find_keypoints_tiled(dog_pyramid, contrast_thresh, edge_thresh);
+        std::vector<Keypoint> tmp_kps = find_keypoints_parallel_naive(dog_pyramid, contrast_thresh, edge_thresh);
         cudaEventRecord(stopEvent, 0);
         cudaEventSynchronize(stopEvent);
         cudaEventElapsedTime(&elapsed_ms, startEvent, stopEvent);
@@ -2479,6 +2493,8 @@ std::vector<std::vector<float>> find_keypoints_and_descriptors_timing(
         opt_total_time += elapsed_ms;
 
         cudaEventRecord(startEvent, 0);
+        // This optimized code fails the accuracy verifications
+        // ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid_optimized(gaussian_pyramid);
         ScaleSpacePyramid grad_pyramid = generate_gradient_pyramid(gaussian_pyramid);
         cudaEventRecord(stopEvent, 0);
         cudaEventSynchronize(stopEvent);
