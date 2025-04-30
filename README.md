@@ -18,10 +18,17 @@ make
 ## How to run parallel code 
 ##### (assumes your current directory is root project directory: `cuda_project`)
 
-### Running executable to compare serial, naive parallel, and optimized parallel code
+### Verification: executable to compare serial, naive parallel, and optimized parallel code
 ```
 cd sift_parallel/bin
 ./compare_serial_parallel ../imgs/ParallelTestData/cat.jpg
+```
+
+### Timing: timing tests for serial, naive parallel, and optimized parallel
+may take a few minutes to run
+```
+cd sift_parallel/bin
+./time_all
 ```
 
 ### Producing an image with features using optimized parallel code
@@ -36,13 +43,6 @@ will create/overwrite a `result.jpg` file in current directory with visualized f
 ```
 cd sift_parallel/bin
 ./match_features ../imgs/book.png ../imgs/book_in_scene.png
-```
-
-### Run comprehensive timing tests for serial, naive parallel, and optimized parallel
-may take a few minutes to run
-```
-cd sift_parallel/bin
-./time_all
 ```
 
 -------------------------------------------------------------
