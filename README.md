@@ -71,7 +71,7 @@ cd sift_serial/bin
 will create/overwrite a `result.jpg` file in current directory with visualized feature matching across images
 ```
 cd sift_serial/bin
-./find_keypoints ../imgs/book.png ../imgs/book_in_scene.png
+./match_features ../imgs/book.png ../imgs/book_in_scene.png
 ```
 
 ----------------------------------------------
