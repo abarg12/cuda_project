@@ -59,7 +59,7 @@ int main(int argc, char *argv[])
     printf("OPTIMIZED PARALLEL TIMING ----------------------------------\n");
     printf("Gaussian Pyramid: %.3f ms\n", time_data[0][2]);
     printf("DoG Pyramid:      %.3f ms\n", time_data[1][2]);
-    printf("Find Keypoints:   -\n", time_data[2][2]);
+    printf("Find Keypoints:   %.3f ms\n", time_data[2][2]);
     printf("Gradient Pyramid: -\n", time_data[3][2]);
     printf("Descriptors:      %.3f ms\n", time_data[4][2]);
     printf("Total SIFT Time:  %.3f ms\n", time_data[5][2]);

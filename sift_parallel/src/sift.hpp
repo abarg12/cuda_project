@@ -122,6 +122,22 @@ std::vector<Keypoint> find_keypoints_parallel_naive(
         float contrast_thresh=C_DOG,
         float edge_thresh=C_EDGE);
 
+/* Summary:
+ *     Identifies the pixel locations of keypoints within the DoG pyramid 
+ *     scale space. Calls a tiled shared memory CUDA kernel that works on 
+ *     pixel-level granularity to identify extrema
+ * Parameters:
+ *   - dog_pyramid: Difference of Gaussians structure, all scales and octaves
+ *   - contrast_thresh: threshold used to filter out low-contrast image regions
+ *   - edge_thresh: threshold used to filter out keypoints located on edges
+ * Return:
+ *     Vector of keypoints identified in the image
+ */
+std::vector<Keypoint> find_keypoints_tiled(
+        const ScaleSpacePyramid& dog_pyramid,
+        float contrast_thresh=C_DOG,
+        float edge_thresh=C_EDGE);
+
 
 /* Summary:
  *     Calculates the image gradients for each image in the Gaussian pyramid

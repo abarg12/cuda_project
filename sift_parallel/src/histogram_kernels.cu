@@ -45,17 +45,17 @@ __global__ void identify_keypoints(float *image,
                     }
 
                     // keypoint comparison to neighbor pixels one scale down
-                    neighbor = image[image_down_idx + (dy * image_width) + dx];
+                    neighbor = image[image_down_idx + offset];
                     if (neighbor > val) is_max = false;
                     if (neighbor < val) is_min = false;
 
                     // keypoint comparison to neighbor pixels one scale up
-                    neighbor = image[image_up_idx + (dy * image_width) + dx];
+                    neighbor = image[image_up_idx + offset];
                     if (neighbor > val) is_max = false;
                     if (neighbor < val) is_min = false;
 
                     // keypoint comparison to neighbor pixels on current scale
-                    neighbor = image[image_idx + (dy * image_width) + dx];
+                    neighbor = image[image_idx + offset];
                     if (neighbor > val) is_max = false;
                     if (neighbor < val) is_min = false;
 
@@ -75,6 +75,23 @@ __global__ void identify_keypoints(float *image,
     return;
 }
 
+
+/* Summary:
+ *     Performs initial keypoint selection by identifying scale-space extrema
+ * Parameters:
+ *   - image: input array with image data for 3 scales
+ *   - keypoints: output array of keypoint locations that is populated with
+ *                a '1' if there is a keypoint at that index in the 1D image
+ *   - image_size: total number of pixels in a single image scale. The 'image'
+ *                 parameter will contain 3*image_size number of pixels.
+ *   - image_width: the width of a single image scale
+ *   - image_height: the height of a single image scale
+ * Return:
+ *     (void) popualtes the 'keypoints' with '1's for keypoint locations.
+ *            The 'keypoints' vector is initialized as all '0's
+ * Notes:
+ *     Uses tiled shared memory to reduce global memory loads
+ */
 __global__ void identify_keypoints_tiled(float *image,
                                         unsigned int *keypoints,
                                         int image_size,
@@ -100,7 +117,7 @@ __global__ void identify_keypoints_tiled(float *image,
 
     int tile_idx = ty * tile_width + tx;
 
-    // load into shared memory
+    // load tile into shared memory
     if (x < image_width && y < image_height) {
         int idx_curr = y * image_width + x;
         int idx_down = idx_curr + image_size;
@@ -113,10 +130,8 @@ __global__ void identify_keypoints_tiled(float *image,
 
     __syncthreads();
 
-    if (x > 0 && x < image_width - 1 &&
-        y > 0 && y < (image_height) - 1 &&
-        tx > 0 && tx < tile_width - 1 &&
-        ty > 0 && ty < tile_height - 1)
+    if (x >= 0 && x < image_width &&
+        y >= 0 && y < image_height)
     {
         float val = tile_current[tile_idx];
 
@@ -125,24 +140,56 @@ __global__ void identify_keypoints_tiled(float *image,
 
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dx = -1; dx <= 1; dx++) {
-                    int neighbor_idx = (ty + dy) * tile_width + (tx + dx);
 
-                    float neighbor = tile_down[neighbor_idx];
-                    if (neighbor > val) is_max = false;
-                    if (neighbor < val) is_min = false;
+                    // special handling for pixels on the edge of tiles
+                    // they will use the global memory since they cannot
+                    // reach into neighboring tile memory
+                    if (dx + tx < 0 || dx + tx >= tile_width ||
+                        dy + ty < 0 || dy + ty >= tile_height) {
 
-                    neighbor = tile_up[neighbor_idx];
-                    if (neighbor > val) is_max = false;
-                    if (neighbor < val) is_min = false;
+                        if (x + dx < 0 || x + dx >= image_width) {
+                            continue;
+                        }
+                        if (y + dy < 0 || y + dy >= image_height) {
+                            continue;
+                        }
 
-                    if (dx != 0 || dy != 0) {
-                        neighbor = tile_current[neighbor_idx];
+                        int offset = (dy * image_width) + dx;
+
+                        // keypoint comparison to neighbor pixels one scale down
+                        float neighbor = image[image_idx + image_size + offset];
                         if (neighbor > val) is_max = false;
                         if (neighbor < val) is_min = false;
 
+                        // keypoint comparison to neighbor pixels one scale up
+                        neighbor = image[image_idx + image_size * 2 + offset];
+                        if (neighbor > val) is_max = false;
+                        if (neighbor < val) is_min = false;
+
+                        // keypoint comparison to neighbor pixels on current scale
+                        neighbor = image[image_idx + offset];
+                        if (neighbor > val) is_max = false;
+                        if (neighbor < val) is_min = false;
+
+                    } else {
+                        int neighbor_idx = (ty + dy) * tile_width + (tx + dx);
+
+                        float neighbor = tile_down[neighbor_idx];
+                        if (neighbor > val) is_max = false;
+                        if (neighbor < val) is_min = false;
+
+                        neighbor = tile_up[neighbor_idx];
+                        if (neighbor > val) is_max = false;
+                        if (neighbor < val) is_min = false;
+
+                        neighbor = tile_current[neighbor_idx];
+                        if (neighbor > val) is_max = false;
+                        if (neighbor < val) is_min = false;
                     }
 
-                    if (!is_min && !is_max) return;
+                    if (!is_min && !is_max) {
+                        return;
+                    }
                 }
             }
 
@@ -785,19 +832,11 @@ __global__ void generate_descriptors_one_block_per_kp(float* gradPyramid,
     // allocate a constant amount of shared memory to hold the descriptor histogram
     __shared__ float histograms[sift::DESC_HIST_SHARED_SIZE];
 
-    // unoptimized method: use one thread to initialize the shared histogram
-    // if (threadIdx.x == 0) {
-    //     for(int i = 0; i < sift::DESC_HIST_SHARED_SIZE; ++i) {
-    //        histograms[i] = 0.0f;
-    //    }
-    // }
-
-    // Instead of using one thread, cooperatively load with all threads in block
+    // Cooperatively load histogram into shared memory with all threads in block
     for(int i = threadIdx.x; i < sift::DESC_HIST_SHARED_SIZE; i += blockDim.x) {
         histograms[i] = 0.0f;
     }
     __syncthreads();
-
 
     float cos_t = cosf(theta), sin_t = sinf(theta);
     float patch_sigma = lambda_desc * kp.sigma;
